@@ -32,9 +32,15 @@ const validateAmount = (req, res, next) => {
   next();
 };
 
-// Middleware de validation pour les types de compte
+// Middleware de validation pour les types de compte - CORRIGÉ
 const validateAccountType = (req, res, next) => {
-  const { typeCompte } = req.body;
+  const { typeCompte, partenaireId } = req.body;
+  
+  // EXEMPTION pour les transactions partenaires
+  if (partenaireId) {
+    return next(); // Passer directement si c'est une transaction partenaire
+  }
+  
   const validTypes = ['LIQUIDE', 'ORANGE_MONEY', 'WAVE', 'UV_MASTER', 'AUTRES'];
   
   if (!typeCompte || !validTypes.includes(typeCompte.toUpperCase())) {
@@ -177,6 +183,9 @@ router.get('/partners/active',
     }
   }
 );
+
+router.get('/admin/daily-transfer/status', TransactionController.getDailyTransferStatus);
+router.get('/admin/transactions/archived', TransactionController.getArchivedTransactions);
 
 // 📊 Types de comptes disponibles
 router.get('/account-types', 
