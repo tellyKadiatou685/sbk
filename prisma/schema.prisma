@@ -146,7 +146,7 @@ model Account {
   type    AccountType
  balance BigInt      @default(0)        // ✅ Remis en BigInt
   initialBalance BigInt  @default(0)     // ✅ Remis en BigInt
-  
+  previousInitialBalance BigInt  @default(0)  
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
   
