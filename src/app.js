@@ -4,7 +4,7 @@ import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
-
+import CronRoutes from './api/cron.js';
 // Import des routes
 import userRoutes from './routes/userRoutes.js';
 import TransactionRoute from './routes/transactionRoutes.js';
@@ -174,6 +174,7 @@ app.use('/api/users', userRoutes);
 app.use('/api/transactions', TransactionRoute);
 app.use('/api/recent', RecentTransactionRoutes);
 app.use('/api/account-lines', AccountLines);
+app.use('/api/cron', CronRoutes);
 
 // Route de test auth
 app.get('/api/test-auth', (req, res) => {
