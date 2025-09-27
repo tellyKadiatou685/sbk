@@ -1,59 +1,82 @@
-// Version alternative avec require() pour plus de compatibilité
-const path = require('path');
+// api/cron.js - Handler complet pour Vercel Cron
 
 export default async function handler(req, res) {
+  console.log("🚀 [CRON] Handler démarré");
+  console.log("📅 [CRON] Timestamp:", new Date().toISOString());
+  console.log("🔧 [CRON] Method:", req.method);
+  console.log("🔧 [CRON] URL:", req.url);
+  
   // Vérification de la méthode HTTP
   if (req.method !== 'POST' && req.method !== 'GET') {
+    console.log("❌ [CRON] Méthode non autorisée:", req.method);
     return res.status(405).json({ 
       success: false,
       message: 'Method not allowed',
+      method: req.method,
       allowedMethods: ['GET', 'POST']
     });
   }
 
   try {
-    // Vérification de l'autorisation
+    // Étape 1: Vérification de CRON_SECRET
+    console.log("🔐 [CRON] Vérification des variables d'environnement...");
+    if (!process.env.CRON_SECRET) {
+      console.error("❌ [CRON] CRON_SECRET non défini");
+      return res.status(500).json({ 
+        success: false,
+        message: 'Configuration error - CRON_SECRET not set',
+        step: 'env_check'
+      });
+    }
+    console.log("✅ [CRON] CRON_SECRET présent");
+
+    // Étape 2: Vérification de l'autorisation
     const authHeader = req.headers.authorization;
     const expectedAuth = `Bearer ${process.env.CRON_SECRET}`;
     
-    if (!process.env.CRON_SECRET) {
-      console.error("❌ [CRON HANDLER] CRON_SECRET non défini");
-      return res.status(500).json({ 
-        success: false,
-        message: 'Configuration error - CRON_SECRET not set' 
-      });
-    }
+    console.log("🔐 [CRON] Vérification autorisation...");
+    console.log("🔐 [CRON] Auth header présent:", !!authHeader);
     
     if (authHeader !== expectedAuth) {
-      console.log("🔒 [CRON HANDLER] Tentative d'accès non autorisé");
+      console.log("❌ [CRON] Autorisation échouée");
+      console.log("🔐 [CRON] Expected format: Bearer YOUR_SECRET");
       return res.status(401).json({ 
         success: false,
-        message: 'Unauthorized' 
+        message: 'Unauthorized',
+        step: 'auth_check',
+        hasAuthHeader: !!authHeader,
+        hint: 'Use Authorization: Bearer YOUR_CRON_SECRET'
       });
     }
+    console.log("✅ [CRON] Autorisation réussie");
 
-    console.log("🤖 [CRON HANDLER] Début exécution du cron job");
-    console.log("📅 [CRON HANDLER] Timestamp:", new Date().toISOString());
+    console.log("🤖 [CRON] Début exécution du cron job");
     
-    // Import du service avec require (plus compatible)
+    // Étape 3: Import du TransactionService
     let TransactionService;
     try {
-      // Essayer différents chemins possibles
-      const possiblePaths = [
-        '../src/services/TransactionService.js',
-        './src/services/TransactionService.js',
-        path.resolve(process.cwd(), 'src/services/TransactionService.js')
+      console.log("📦 [CRON] Import du TransactionService...");
+      
+      // Essayer différents chemins possibles selon la structure
+      const importPaths = [
+        '../src/services/TransactionService.js',  // Chemin relatif depuis api/
+        './src/services/TransactionService.js',   // Depuis la racine si CWD change
+        '../TransactionService.js',               // Si dans src/ directement
+        'src/services/TransactionService.js'      // Chemin absolu depuis racine
       ];
       
-      let serviceModule;
-      for (const servicePath of possiblePaths) {
+      let serviceModule = null;
+      let successPath = null;
+      
+      for (const importPath of importPaths) {
         try {
-          console.log(`🔍 [CRON HANDLER] Tentative d'import depuis: ${servicePath}`);
-          serviceModule = await import(servicePath);
-          console.log(`✅ [CRON HANDLER] Import réussi depuis: ${servicePath}`);
+          console.log(`🔍 [CRON] Tentative d'import: ${importPath}`);
+          serviceModule = await import(importPath);
+          successPath = importPath;
+          console.log(`✅ [CRON] Import réussi depuis: ${importPath}`);
           break;
         } catch (pathError) {
-          console.log(`❌ [CRON HANDLER] Échec d'import depuis ${servicePath}:`, pathError.message);
+          console.log(`❌ [CRON] Échec import ${importPath}:`, pathError.message);
           continue;
         }
       }
@@ -65,57 +88,80 @@ export default async function handler(req, res) {
       TransactionService = serviceModule.default || serviceModule;
       
       if (!TransactionService) {
-        throw new Error('TransactionService export is undefined');
+        throw new Error('TransactionService export is undefined ou null');
       }
       
-      console.log("✅ [CRON HANDLER] TransactionService importé avec succès");
+      console.log("✅ [CRON] TransactionService importé avec succès");
+      console.log("📋 [CRON] Chemin utilisé:", successPath);
+      
     } catch (importError) {
-      console.error("❌ [CRON HANDLER] Erreur lors de l'import du service:", importError);
+      console.error("❌ [CRON] Erreur lors de l'import du service:", importError);
+      console.error("📋 [CRON] Stack trace import:", importError.stack);
       return res.status(500).json({ 
         success: false, 
         error: "Service import failed",
         details: importError.message,
+        step: 'import_service',
         stack: process.env.NODE_ENV === 'development' ? importError.stack : undefined
       });
     }
 
-    // Vérification que la méthode forceReset existe
+    // Étape 4: Vérification que la méthode forceReset existe
+    console.log("🔍 [CRON] Vérification des méthodes disponibles...");
+    
+    if (!TransactionService || typeof TransactionService !== 'object') {
+      console.error("❌ [CRON] TransactionService n'est pas un objet valide");
+      return res.status(500).json({ 
+        success: false,
+        error: "Invalid service object",
+        serviceType: typeof TransactionService,
+        step: 'validate_service'
+      });
+    }
+    
+    const availableMethods = Object.keys(TransactionService);
+    console.log("📋 [CRON] Méthodes disponibles:", availableMethods);
+    
     if (typeof TransactionService.forceReset !== 'function') {
-      console.error("❌ [CRON HANDLER] forceReset method not found");
-      console.log("📋 [CRON HANDLER] Available methods:", Object.keys(TransactionService));
+      console.error("❌ [CRON] forceReset method not found");
       return res.status(500).json({ 
         success: false,
         error: "Service method not available",
         details: "forceReset method not found on TransactionService",
-        availableMethods: Object.keys(TransactionService)
+        availableMethods: availableMethods,
+        step: 'validate_method'
       });
     }
+    
+    console.log("✅ [CRON] Méthode forceReset trouvée");
 
-    // Exécution du reset
-    console.log("🔄 [CRON HANDLER] Exécution du forceReset...");
+    // Étape 5: Exécution du reset
+    console.log("🔄 [CRON] Exécution du forceReset...");
     const startTime = Date.now();
     
     const result = await TransactionService.forceReset('vercel-cron');
     
     const executionTime = Date.now() - startTime;
-    console.log(`✅ [CRON HANDLER] Reset terminé avec succès en ${executionTime}ms`);
-    console.log("📊 [CRON HANDLER] Résultat:", JSON.stringify(result, null, 2));
+    console.log(`✅ [CRON] Reset terminé avec succès en ${executionTime}ms`);
+    console.log("📊 [CRON] Résultat:", JSON.stringify(result, null, 2));
     
     return res.status(200).json({ 
       success: true, 
       data: result,
       executionTime: `${executionTime}ms`,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      step: 'completed'
     });
 
   } catch (error) {
-    console.error("❌ [CRON HANDLER] Erreur générale:", error);
-    console.error("📋 [CRON HANDLER] Stack trace:", error.stack);
+    console.error("❌ [CRON] Erreur générale:", error);
+    console.error("📋 [CRON] Stack trace:", error.stack);
     
     return res.status(500).json({ 
       success: false, 
       error: error.message,
       timestamp: new Date().toISOString(),
+      step: 'general_error',
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
