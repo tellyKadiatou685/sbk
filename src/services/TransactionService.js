@@ -1,4 +1,4 @@
-// src/services/TransactionService.js - VERSION FINALE AVEC RESET DYNAMIQUE CORRIGÉ
+// src/services/TransactionService.js - VERSION FINALE AVEC CRON AUTOMATIQUE VERCEL
 import prisma from '../config/database.js';
 import NotificationService from './NotificationService.js';
 
@@ -7,31 +7,153 @@ class TransactionService {
   // CONFIGURATION CENTRALISÉE DU RESET
   // =====================================
   static RESET_CONFIG = {
-    hour: 16,        // Heure de déclenchement (0 = minuit)
-    minute: 52,      // Minute de déclenchement
-    windowMinutes: 0 // Fenêtre de déclenchement en minutes
+    hour: 0,        // Heure de reset (00h00 UTC pour Vercel CRON)
+    minute: 0,      // Minute de reset  
+    windowMinutes: 5 // Fenêtre de reset en minutes
   };
+
+  // =====================================
+  // SYSTÈME DE NOTIFICATIONS ET AUTO-REFRESH
+  // =====================================
+  async needsDashboardRefresh(lastCheckTime) {
+    try {
+      const resetConfig = this.getResetConfig();
+      const now = new Date();
+      const todayResetTime = new Date(now);
+      todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+      
+      if (now > todayResetTime && lastCheckTime < todayResetTime) {
+        return {
+          needsRefresh: true,
+          resetExecutedAt: todayResetTime.toISOString(),
+          reason: 'reset_occurred_since_last_check',
+          currentTime: now.toISOString()
+        };
+      }
+      
+      let nextResetTime = new Date(todayResetTime);
+      if (now > todayResetTime) {
+        nextResetTime.setDate(nextResetTime.getDate() + 1);
+      }
+      
+      return {
+        needsRefresh: false,
+        nextResetAt: nextResetTime.toISOString(),
+        currentTime: now.toISOString(),
+        minutesUntilReset: Math.ceil((nextResetTime - now) / (1000 * 60))
+      };
+      
+    } catch (error) {
+      console.error('❌ [REFRESH CHECK] Erreur:', error);
+      return { needsRefresh: false, error: error.message };
+    }
+  }
+
+  async notifyDashboardRefresh(resetDetails = {}) {
+    try {
+      console.log('📢 [NOTIFICATIONS] Envoi notifications de reset...');
+      
+      const now = new Date();
+      const { archivedCount = 0, cleanedCount = 0 } = resetDetails;
+      
+      const [activeSupervisors, adminUsers, activePartners] = await Promise.all([
+        prisma.user.findMany({
+          where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
+          select: { id: true, nomComplet: true }
+        }),
+        prisma.user.findMany({
+          where: { role: 'ADMIN' },
+          select: { id: true, nomComplet: true }
+        }),
+        prisma.user.findMany({
+          where: { role: 'PARTENAIRE', status: 'ACTIVE' },
+          select: { id: true, nomComplet: true }
+        })
+      ]);
+      
+      const notifications = [];
+      
+      activeSupervisors.forEach(supervisor => {
+        notifications.push({
+          userId: supervisor.id,
+          title: 'Dashboard Actualisé',
+          message: `Reset quotidien effectué à ${now.getHours()}:${now.getMinutes().toString().padStart(2, '0')}. Vos soldes ont été transférés et les données mises à jour.`,
+          type: 'RESET_SUPERVISOR'
+        });
+      });
+      
+      adminUsers.forEach(admin => {
+        notifications.push({
+          userId: admin.id,
+          title: 'Reset Quotidien Terminé',
+          message: `Reset effectué avec succès : ${archivedCount} transactions archivées, ${cleanedCount} nettoyées. Tous les dashboards sont à jour.`,
+          type: 'RESET_ADMIN'
+        });
+      });
+      
+      activePartners.forEach(partner => {
+        notifications.push({
+          userId: partner.id,
+          title: 'Nouveau Jour Commencé',
+          message: `Les compteurs ont été remis à zéro. Nouveau cycle de transactions disponible.`,
+          type: 'RESET_PARTNER'
+        });
+      });
+      
+      const notificationPromises = notifications.map(notif => 
+        NotificationService.createNotification(notif)
+      );
+      
+      const results = await Promise.allSettled(notificationPromises);
+      
+      const successful = results.filter(r => r.status === 'fulfilled').length;
+      const failed = results.filter(r => r.status === 'rejected').length;
+      
+      console.log(`✅ [NOTIFICATIONS] ${successful} notifications envoyées, ${failed} échecs`);
+      
+      if (successful > 0) {
+        await NotificationService.createNotification({
+          userId: adminUsers[0]?.id || 'system',
+          title: 'Notifications Reset Envoyées',
+          message: `${successful} utilisateurs notifiés du reset quotidien`,
+          type: 'SYSTEM_INFO'
+        });
+      }
+      
+      return {
+        totalNotifications: notifications.length,
+        successful,
+        failed,
+        details: resetDetails
+      };
+      
+    } catch (error) {
+      console.error('❌ [NOTIFICATIONS] Erreur envoi notifications:', error);
+      return {
+        error: error.message,
+        totalNotifications: 0,
+        successful: 0,
+        failed: 0
+      };
+    }
+  }
 
   // =====================================
   // UTILITAIRES ET HELPERS OPTIMISÉS
   // =====================================
-
-  // Méthode pour obtenir la configuration de reset
   getResetConfig() {
     return TransactionService.RESET_CONFIG;
   }
 
-  // Modifier la configuration (pour les tests)
-  setResetConfig(hour, minute, windowMinutes = 2) {
+  setResetConfig(hour, minute, windowMinutes = 5) {
     TransactionService.RESET_CONFIG = {
       hour,
       minute,
       windowMinutes
     };
-    console.log(`🔧 [CONFIG] Reset configuré pour ${hour}:${minute.toString().padStart(2, '0')}`);
+    console.log(`🔧 [CONFIG] Reset configuré pour ${hour}:${minute.toString().padStart(2, '0')} (fenêtre: ${windowMinutes}min)`);
   }
 
-  // Vérifier si on est dans la fenêtre de reset
   isInResetWindow() {
     const now = new Date();
     const resetConfig = this.getResetConfig();
@@ -39,150 +161,200 @@ class TransactionService {
     const currentHour = now.getHours();
     const currentMinute = now.getMinutes();
     
-    const startMinute = resetConfig.minute;
-    const endMinute = resetConfig.minute + resetConfig.windowMinutes;
+    let isInWindow;
     
-    const isInWindow = currentHour === resetConfig.hour && 
-                       currentMinute >= startMinute && 
-                       currentMinute <= endMinute;
+    if (resetConfig.windowMinutes === 0) {
+      isInWindow = currentHour === resetConfig.hour && currentMinute === resetConfig.minute;
+    } else {
+      const startMinute = resetConfig.minute;
+      const endMinute = resetConfig.minute + resetConfig.windowMinutes;
+      
+      isInWindow = currentHour === resetConfig.hour && 
+                   currentMinute >= startMinute && 
+                   currentMinute <= endMinute;
+    }
     
     return {
       isInWindow,
       currentTime: `${currentHour}:${currentMinute.toString().padStart(2, '0')}`,
-      resetWindow: `${resetConfig.hour}:${resetConfig.minute.toString().padStart(2, '0')}-${resetConfig.hour}:${endMinute.toString().padStart(2, '0')}`
+      resetTime: `${resetConfig.hour}:${resetConfig.minute.toString().padStart(2, '0')}`,
+      windowType: resetConfig.windowMinutes === 0 ? 'précis' : `fenêtre ${resetConfig.windowMinutes}min`
     };
   }
 
-  // Calculer dynamiquement ce qui constitue "hier" selon l'heure de reset
   getYesterdayRange() {
     const now = new Date();
     const resetConfig = this.getResetConfig();
     
+    // Calculer le reset d'hier
+    const yesterdayResetTime = new Date(now);
+    yesterdayResetTime.setDate(now.getDate() - 1);
+    yesterdayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+    
+    // Calculer le reset d'aujourd'hui
     const todayResetTime = new Date(now);
     todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
     
-    let startOfYesterday, endOfYesterday;
+    // Hier = du reset d'hier jusqu'à juste avant le reset d'aujourd'hui
+    const startOfYesterday = yesterdayResetTime;
+    const endOfYesterday = new Date(todayResetTime.getTime() - 1000); // 1 seconde avant
     
-    if (now < todayResetTime) {
-      // On est avant le reset d'aujourd'hui
-      // "Hier" = depuis le reset d'avant-hier jusqu'au reset d'aujourd'hui (exclu)
-      const yesterdayDate = new Date(now);
-      yesterdayDate.setDate(now.getDate() - 1);
-      
-      // Début d'hier = reset d'avant-hier
-      startOfYesterday = new Date(yesterdayDate);
-      startOfYesterday.setDate(yesterdayDate.getDate() - 1);
-      startOfYesterday.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
-      
-      // Fin d'hier = juste avant le reset d'aujourd'hui
-      endOfYesterday = new Date(todayResetTime);
-      endOfYesterday.setMinutes(endOfYesterday.getMinutes() - 1);
-      endOfYesterday.setSeconds(59, 999);
-      
-    } else {
-      // On est après le reset d'aujourd'hui
-      // "Hier" = depuis le reset d'hier jusqu'au reset d'aujourd'hui (exclu)
-      const yesterdayDate = new Date(now);
-      yesterdayDate.setDate(now.getDate() - 1);
-      
-      // Début d'hier = reset d'hier
-      startOfYesterday = new Date(yesterdayDate);
-      startOfYesterday.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
-      
-      // Fin d'hier = juste avant le reset d'aujourd'hui
-      endOfYesterday = new Date(todayResetTime);
-      endOfYesterday.setMinutes(endOfYesterday.getMinutes() - 1);
-      endOfYesterday.setSeconds(59, 999);
-    }
-    
-    console.log(`📅 [YESTERDAY RANGE] Reset à ${resetConfig.hour}:${resetConfig.minute.toString().padStart(2, '0')}:`, {
-      now: now.toISOString(),
-      todayResetTime: todayResetTime.toISOString(),
-      beforeReset: now < todayResetTime,
-      startOfYesterday: startOfYesterday.toISOString(),
-      endOfYesterday: endOfYesterday.toISOString()
-    });
+    console.log(`📅 [YESTERDAY RANGE] ${yesterdayResetTime.toISOString()} -> ${endOfYesterday.toISOString()}`);
     
     return { startOfYesterday, endOfYesterday };
   }
 
-  // Déterminer dynamiquement si une période doit inclure les transactions archivées
-  shouldIncludeArchivedTransactions(period) {
-    if (period === 'yesterday') {
-      const resetConfig = this.getResetConfig();
-      const now = new Date();
-      const todayResetTime = new Date(now);
-      todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
-      
-      // Si on est après le reset d'aujourd'hui, "hier" = données archivées
-      return now > todayResetTime;
-    }
+  getCustomDateRange(targetDate) {
+    const resetConfig = this.getResetConfig();
+    const customDate = new Date(targetDate);
     
-    return false;
+    // Date de la veille
+    const dayBefore = new Date(customDate);
+    dayBefore.setDate(customDate.getDate() - 1);
+    
+    // Début = reset de la veille à l'heure configurée
+    const startOfCustom = new Date(dayBefore);
+    startOfCustom.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+    
+    // Fin = juste avant le reset du jour cible
+    const customResetTime = new Date(customDate);
+    customResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+    
+    const endOfCustom = new Date(customResetTime.getTime() - 1000); // 1 seconde avant
+    
+    console.log(`📅 [CUSTOM DATE RANGE] Reset à ${resetConfig.hour}:${resetConfig.minute.toString().padStart(2, '0')}:`, {
+      targetDate: customDate.toISOString(),
+      startOfCustom: startOfCustom.toISOString(),
+      endOfCustom: endOfCustom.toISOString()
+    });
+    
+    return { startOfCustom, endOfCustom };
   }
 
-  // Générer une référence unique pour transaction
+  // CORRECTION MAJEURE : Reset basé sur exécution réelle via CRON
+  async shouldIncludeArchivedTransactions(period, customDate = null) {
+    try {
+      // CORRECTION : Vérifier si un reset a VRAIMENT eu lieu aujourd'hui via CRON
+      const lastResetDate = await this.getLastResetDate();
+      const today = new Date().toDateString();
+      
+      // Un reset a vraiment eu lieu si :
+      // 1. Il y a une entrée pour aujourd'hui
+      // 2. Elle contient "SUCCESS" (pas "ERROR")
+      const resetReallyExecutedToday = lastResetDate && 
+                                       lastResetDate.includes(today) && 
+                                       lastResetDate.includes('SUCCESS');
+      
+      console.log(`🔍 [RESET CHECK] Aujourd'hui: ${today}, Dernier reset: ${lastResetDate}, Reset exécuté: ${resetReallyExecutedToday}`);
+      
+      if (period === 'custom' && customDate) {
+        const targetDate = new Date(customDate);
+        const targetDateOnly = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
+        const todayOnly = new Date();
+        todayOnly.setHours(0, 0, 0, 0);
+        
+        // CORRECTION : Pour une date personnalisée passée
+        if (targetDateOnly < todayOnly) {
+          // Vérifier s'il y a eu un reset depuis cette date
+          const daysSinceTarget = Math.floor((todayOnly - targetDateOnly) / (1000 * 60 * 60 * 24));
+          
+          if (daysSinceTarget === 1) {
+            // Date d'hier - utiliser la logique yesterday
+            return resetReallyExecutedToday;
+          } else if (daysSinceTarget > 1) {
+            // Date plus ancienne - probablement archivée
+            return true;
+          }
+        }
+        
+        return false;
+      }
+      
+      if (period === 'yesterday') {
+        // Inclure les archivées seulement si le reset a VRAIMENT eu lieu aujourd'hui via CRON
+        return resetReallyExecutedToday;
+      }
+      
+      return false;
+      
+    } catch (error) {
+      console.error('❌ [SHOULD INCLUDE ARCHIVED] Erreur:', error);
+      return false;
+    }
+  }
+
   generateReference(prefix = 'TXN') {
     const timestamp = Date.now().toString(36).toUpperCase();
     const random = Math.random().toString(36).substring(2, 5).toUpperCase();
     return `${prefix}-${timestamp}-${random}`;
   }
 
- formatAmount(amount, withSign = false) {
-  const num = typeof amount === 'number' ? amount : parseFloat(amount);
-  
-  if (withSign) {
-    if (num > 0) {
-      return `+${num.toLocaleString('fr-FR')} F`;
-    } else if (num < 0) {
-      return `${num.toLocaleString('fr-FR')} F`;
-    } else {
-      return `${num.toLocaleString('fr-FR')} F`;
+  formatAmount(amount, withSign = false) {
+    const num = typeof amount === 'number' ? amount : parseFloat(amount);
+    
+    if (withSign) {
+      if (num > 0) {
+        return `+${num.toLocaleString('fr-FR')} F`;
+      } else if (num < 0) {
+        return `${num.toLocaleString('fr-FR')} F`;
+      } else {
+        return `${num.toLocaleString('fr-FR')} F`;
+      }
     }
+    
+    return `${Math.abs(num).toLocaleString('fr-FR')} F`;
   }
-  
-  return `${Math.abs(num).toLocaleString('fr-FR')} F`;
-}
 
-formatAmount(amount, withSign = false) {
-  const num = typeof amount === 'number' ? amount : parseFloat(amount);
-  
-  if (withSign) {
-    // Afficher le résultat réel, avec le bon signe
-    if (num > 0) {
-      return `+${num.toLocaleString('fr-FR')} F`;
-    } else if (num < 0) {
-      return `${num.toLocaleString('fr-FR')} F`; // Le signe - sera automatique
-    } else {
-      return `${num.toLocaleString('fr-FR')} F`;
-    }
-  }
-  
-  return `${Math.abs(num).toLocaleString('fr-FR')} F`;
-}
-
-  // Méthode de filtre de date DYNAMIQUE basée sur la config reset
-  getDateFilter(period = 'today') {
+  // CORRECTION MAJEURE : Logique de dates basée sur reset réel via CRON
+  getDateFilter(period = 'today', customDate = null) {
     const now = new Date();
     const resetConfig = this.getResetConfig();
     
-    console.log(`🔍 [DYNAMIC FILTER] Période: "${period}" avec reset à ${resetConfig.hour}:${resetConfig.minute.toString().padStart(2, '0')}`);
+    console.log(`🔍 [DATE FILTER] Période: "${period}", Date custom: ${customDate}`);
     
+    // Support des dates personnalisées
+    if (period === 'custom' && customDate) {
+      const targetDate = new Date(customDate);
+      
+      if (isNaN(targetDate.getTime())) {
+        throw new Error('Date invalide');
+      }
+      
+      // CORRECTION : Utiliser la logique basée sur le reset
+      const { startOfCustom, endOfCustom } = this.getCustomDateRange(targetDate);
+      
+      console.log(`📅 [CUSTOM DATE] ${customDate}:`, {
+        gte: startOfCustom.toISOString(),
+        lte: endOfCustom.toISOString(),
+        resetBasedOn: `${resetConfig.hour}h${resetConfig.minute}`
+      });
+      
+      return { gte: startOfCustom, lte: endOfCustom };
+    }
+    
+    // Logique pour les autres périodes
     switch (period.toLowerCase()) {
       case 'today':
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-        const endOfDay = new Date();
+        const todayResetTime = new Date(now);
+        todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
         
-        console.log(`📅 [DYNAMIC] TODAY:`, {
-          gte: startOfDay.toISOString(),
-          lte: endOfDay.toISOString()
+        // Today commence au reset d'aujourd'hui (ou hier si pas encore passé)
+        const startOfToday = now > todayResetTime ? todayResetTime : (() => {
+          const yesterdayReset = new Date(todayResetTime);
+          yesterdayReset.setDate(yesterdayReset.getDate() - 1);
+          return yesterdayReset;
+        })();
+        
+        console.log(`📅 [TODAY] (basé sur reset CRON):`, {
+          gte: startOfToday.toISOString(),
+          lte: now.toISOString()
         });
-        return { gte: startOfDay, lte: endOfDay };
+        return { gte: startOfToday, lte: now };
 
       case 'yesterday':
         const { startOfYesterday, endOfYesterday } = this.getYesterdayRange();
         
-        console.log(`📅 [DYNAMIC] YESTERDAY (basé sur reset ${resetConfig.hour}h${resetConfig.minute}):`, {
+        console.log(`📅 [YESTERDAY] (basé sur reset CRON ${resetConfig.hour}h${resetConfig.minute}):`, {
           gte: startOfYesterday.toISOString(),
           lte: endOfYesterday.toISOString()
         });
@@ -206,12 +378,51 @@ formatAmount(amount, withSign = false) {
         return {};
 
       default:
-        const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
-        return { gte: todayStart, lte: new Date() };
+        const defaultStart = new Date(now);
+        defaultStart.setHours(0, 0, 0, 0);
+        return { gte: defaultStart, lte: now };
     }
   }
 
-  // Helper pour extraire le type de compte
+  validateCustomDateTime(dateTimeString) {
+    if (!dateTimeString) return { valid: false, error: 'DateTime requise' };
+    
+    const dateTime = new Date(dateTimeString);
+    
+    if (isNaN(dateTime.getTime())) {
+      return { valid: false, error: 'Format de datetime invalide. Utilisez: YYYY-MM-DD' };
+    }
+    
+    const now = new Date();
+    const oneYearAgo = new Date();
+    oneYearAgo.setFullYear(now.getFullYear() - 1);
+    
+    if (dateTime > now) {
+      return { valid: false, error: 'DateTime future non autorisée' };
+    }
+    
+    if (dateTime < oneYearAgo) {
+      return { valid: false, error: 'DateTime trop ancienne (limite: 1 an)' };
+    }
+    
+    return { valid: true, dateTime };
+  }
+
+  formatDateForDisplay(dateString) {
+    const date = new Date(dateString);
+    
+    return {
+      short: date.toLocaleDateString('fr-FR'),
+      long: date.toLocaleDateString('fr-FR', { 
+        weekday: 'long', 
+        year: 'numeric', 
+        month: 'long', 
+        day: 'numeric' 
+      }),
+      iso: date.toISOString().split('T')[0]
+    };
+  }
+
   extractAccountTypeFromDescription(description) {
     if (!description) return 'LIQUIDE';
     
@@ -225,7 +436,6 @@ formatAmount(amount, withSign = false) {
     return 'LIQUIDE';
   }
 
-  // Conversion simplifiée
   convertToInt(value) {
     if (typeof value === 'number') return Math.round(value * 100);
     if (typeof value === 'string') return Math.round(parseFloat(value) * 100);
@@ -237,14 +447,12 @@ formatAmount(amount, withSign = false) {
   }
 
   // =====================================
-  // CRÉATION ADMIN TRANSACTION - ULTRA OPTIMISÉE
+  // CRÉATION ADMIN TRANSACTION
   // =====================================
-
   async createAdminTransaction(adminId, transactionData) {
     try {
       const { superviseurId, typeCompte, typeOperation, montant, partenaireId } = transactionData;
 
-      // VALIDATION PRÉCOCE
       const montantFloat = parseFloat(montant);
       if (isNaN(montantFloat) || montantFloat <= 0) {
         throw new Error('Montant invalide');
@@ -252,7 +460,6 @@ formatAmount(amount, withSign = false) {
 
       const montantInt = this.convertToInt(montantFloat);
 
-      // REQUÊTE UNIQUE POUR VÉRIFICATIONS
       const [supervisor, partner] = await Promise.all([
         prisma.user.findUnique({
           where: { id: superviseurId, role: 'SUPERVISEUR' },
@@ -277,11 +484,7 @@ formatAmount(amount, withSign = false) {
       let account = null;
       let balanceUpdate = {};
 
-      // LOGIQUE DIFFÉRENTE POUR TRANSACTIONS PARTENAIRES
       if (isPartnerTransaction) {
-        // POUR PARTENAIRES : Pas de compte spécifique, pas de mise à jour de solde
-        
-        // Déterminer le type de transaction et description
         let transactionType, description;
         
         if (typeOperation === 'depot') {
@@ -292,9 +495,7 @@ formatAmount(amount, withSign = false) {
           description = `Retrait partenaire ${partner.nomComplet}`;
         }
 
-        // TRANSACTION ATOMIQUE pour partenaires
         const result = await prisma.$transaction(async (tx) => {
-          // Création de la transaction SANS compte associé
           const transaction = await tx.transaction.create({
             data: {
               montant: montantInt,
@@ -303,7 +504,6 @@ formatAmount(amount, withSign = false) {
               envoyeurId: adminId,
               destinataireId: superviseurId,
               partenaireId
-              // PAS de compteDestinationId pour les transactions partenaires
             },
             select: {
               id: true,
@@ -316,7 +516,6 @@ formatAmount(amount, withSign = false) {
           return { transaction, updatedAccount: null };
         });
 
-        // NOTIFICATION pour partenaires
         setImmediate(async () => {
           try {
             let notificationTitle, notificationMessage, notificationType;
@@ -360,9 +559,6 @@ formatAmount(amount, withSign = false) {
         };
 
       } else {
-        // LOGIQUE EXISTANTE POUR DÉBUT/FIN JOURNÉE
-        
-        // UPSERT pour le compte
         account = await prisma.account.upsert({
           where: {
             userId_type: {
@@ -380,7 +576,6 @@ formatAmount(amount, withSign = false) {
           select: { id: true, balance: true, initialBalance: true }
         });
 
-        // Déterminer le type de transaction et description
         let transactionType, description;
         
         if (typeOperation === 'depot') {
@@ -393,16 +588,13 @@ formatAmount(amount, withSign = false) {
           balanceUpdate = { balance: montantInt };
         }
 
-        // TRANSACTION ATOMIQUE pour début/fin journée
         const result = await prisma.$transaction(async (tx) => {
-          // Mise à jour du compte
           const updatedAccount = await tx.account.update({
             where: { id: account.id },
             data: balanceUpdate,
             select: { balance: true, initialBalance: true }
           });
 
-          // Création de la transaction
           const transaction = await tx.transaction.create({
             data: {
               montant: montantInt,
@@ -423,7 +615,6 @@ formatAmount(amount, withSign = false) {
           return { transaction, updatedAccount };
         });
 
-        // NOTIFICATION pour début/fin journée
         setImmediate(async () => {
           try {
             const notificationTitle = typeOperation === 'depot' 
@@ -470,22 +661,18 @@ formatAmount(amount, withSign = false) {
   }
 
   // =====================================
-  // SYSTÈME DE RESET DYNAMIQUE CORRIGÉ
+  // SYSTÈME DE RESET AUTOMATIQUE VERCEL CRON
   // =====================================
-
-  // NOUVEAU: Méthode pour nettoyer complètement les dashboards après reset
   async cleanupDashboardAfterReset() {
     try {
       console.log('🧹 [CLEANUP] Nettoyage post-reset...');
       
-      // 1. Archiver toutes les transactions partenaires de "aujourd'hui avant reset"
       const now = new Date();
       const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
       const resetConfig = this.getResetConfig();
       const todayResetTime = new Date(now);
       todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
       
-      // Archiver les transactions partenaires de la période "avant reset aujourd'hui"
       const cleanupResult = await prisma.transaction.updateMany({
         where: {
           createdAt: {
@@ -503,23 +690,6 @@ formatAmount(amount, withSign = false) {
       
       console.log(`✅ [CLEANUP] ${cleanupResult.count} transactions partenaires nettoyées`);
       
-      if (cleanupResult.count > 0) {
-        // Utiliser un vrai ID utilisateur au lieu de 'system'
-        const adminUser = await prisma.user.findFirst({
-          where: { role: 'ADMIN' },
-          select: { id: true }
-        });
-        
-        await prisma.transaction.create({
-          data: {
-            montant: 0,
-            type: 'DEPOT', // Type valide comme marqueur
-            description: `[SYSTEM] Nettoyage post-reset: ${cleanupResult.count} transactions partenaires archivées`,
-            envoyeurId: adminUser?.id || 'cmffpzf8e0000248t0hu4w1gr' // Fallback vers un ID réel
-          }
-        });
-      }
-      
       return cleanupResult.count;
       
     } catch (error) {
@@ -528,87 +698,95 @@ formatAmount(amount, withSign = false) {
     }
   }
 
+  // CORRECTION : checkAndResetDaily maintenu pour compatibilité mais pas utilisé en production
   async checkAndResetDaily() {
     try {
       const resetCheck = this.isInResetWindow();
       
-      console.log(`[DYNAMIC RESET] Heure actuelle: ${resetCheck.currentTime}`);
-      console.log(`[DYNAMIC RESET] Fenêtre de reset: ${resetCheck.resetWindow}`);
-      console.log(`[DYNAMIC RESET] Dans la fenêtre ? ${resetCheck.isInWindow}`);
-      
       if (!resetCheck.isInWindow) {
-        return;
+        return {
+          success: false,
+          reason: 'outside_reset_window',
+          currentTime: resetCheck.currentTime,
+          resetWindow: `${resetCheck.resetTime} (${resetCheck.windowType})`,
+          cronMessage: 'Reset géré par Vercel CRON à 00h00 UTC'
+        };
       }
       
       const now = new Date();
       const dateKey = now.toDateString();
       const lastResetDate = await this.getLastResetDate();
       
-      // MODIFICATION: Vérifier l'heure exacte, pas seulement la date
       const resetConfig = this.getResetConfig();
       const resetHourMinute = `${resetConfig.hour}:${resetConfig.minute}`;
       const shouldReset = !lastResetDate || 
                          !lastResetDate.includes(dateKey) || 
                          lastResetDate.includes('ERROR') ||
-                         !lastResetDate.includes(resetHourMinute); // Nouveau check
+                         !lastResetDate.includes(resetHourMinute);
       
       if (shouldReset) {
-        console.log('🔄 [DYNAMIC RESET] Lancement du reset quotidien complet...');
+        console.log('🔄 [MANUAL RESET] Lancement du reset manuel (normalement géré par CRON)...');
         
         try {
-          // ÉTAPE 1: Archiver les transactions d'hier selon la logique dynamique  
+          // Exécuter toutes les opérations ensemble
           const archivedCount = await this.archivePartnerTransactionsDynamic();
-          
-          // ÉTAPE 2: Transférer les soldes (sortie → début, sortie → 0)
           await this.transferBalancesToInitial();
-          
-          // ÉTAPE 3: NOUVEAU - Nettoyer les transactions partenaires d'aujourd'hui
           const cleanedCount = await this.cleanupDashboardAfterReset();
           
-          // ÉTAPE 4: Sauvegarder le succès
-          const resetKey = `${dateKey}-SUCCESS-${resetCheck.currentTime}`;
+          const resetKey = `${dateKey}-SUCCESS-${resetCheck.currentTime}-${resetHourMinute}-manual`;
           await this.saveResetDate(resetKey);
           
-          console.log(`✅ [DYNAMIC RESET] Reset terminé - ${archivedCount} archivées, ${cleanedCount} nettoyées`);
+          console.log(`✅ [MANUAL RESET] Reset terminé - ${archivedCount} archivées, ${cleanedCount} nettoyées`);
+          
+          const notificationResult = await this.notifyDashboardRefresh({
+            archivedCount,
+            cleanedCount,
+            executedAt: now.toISOString()
+          });
+          
+          console.log(`📢 [MANUAL RESET] ${notificationResult.successful} notifications envoyées`);
           
           return {
             success: true,
             archivedCount,
             cleanedCount,
             executedAt: now.toISOString(),
-            resetConfig: this.getResetConfig()
+            resetConfig: this.getResetConfig(),
+            notifications: notificationResult,
+            needsRefresh: true,
+            type: 'manual'
           };
           
         } catch (resetError) {
-          console.error('❌ [DYNAMIC RESET] Erreur:', resetError);
+          console.error('❌ [MANUAL RESET] Erreur:', resetError);
           const errorKey = `${dateKey}-ERROR-${resetCheck.currentTime}`;
           await this.saveResetDate(errorKey);
           throw resetError;
         }
       } else {
-        console.log(`[DYNAMIC RESET] Reset déjà effectué aujourd'hui (${lastResetDate})`);
+        console.log(`[MANUAL RESET] Reset déjà effectué aujourd'hui (${lastResetDate})`);
         return {
           success: false,
           reason: 'already_executed_today',
-          lastExecution: lastResetDate
+          lastExecution: lastResetDate,
+          currentTime: resetCheck.currentTime,
+          cronMessage: 'Reset géré par Vercel CRON'
         };
       }
       
     } catch (error) {
-      console.error('❌ [DYNAMIC RESET] Erreur checkAndResetDaily:', error);
-      return { success: false, error: error.message };
+      console.error('❌ [MANUAL RESET] Erreur checkAndResetDaily:', error);
+      return { 
+        success: false, 
+        error: error.message,
+        currentTime: new Date().toISOString()
+      };
     }
   }
 
   async archivePartnerTransactionsDynamic() {
     try {
       const { startOfYesterday, endOfYesterday } = this.getYesterdayRange();
-      
-      console.log(`🗄️ [DYNAMIC ARCHIVE] Archivage transactions partenaires:`, {
-        start: startOfYesterday.toISOString(),
-        end: endOfYesterday.toISOString(),
-        resetConfig: this.getResetConfig()
-      });
       
       const result = await prisma.transaction.updateMany({
         where: {
@@ -629,24 +807,10 @@ formatAmount(amount, withSign = false) {
         }
       });
       
-      console.log(`✅ [DYNAMIC ARCHIVE] ${result.count} transactions archivées`);
-      
-      if (result.count > 0) {
-        // Utiliser un vrai ID utilisateur au lieu de 'system'
-        const adminUser = await prisma.user.findFirst({
-          where: { role: 'ADMIN' },
-          select: { id: true }
-        });
-        
-        await prisma.transaction.create({
-          data: {
-            montant: 0,
-            type: 'DEPOT', // Type valide
-            description: `[SYSTEM] Archivage quotidien dynamique: ${result.count} transactions partenaires`,
-            envoyeurId: adminUser?.id || 'cmffpzf8e0000248t0hu4w1gr' // Fallback vers un ID réel
-          }
-        });
-      }
+      console.log(`✅ [DYNAMIC ARCHIVE] ${result.count} transactions archivées pour la période:`, {
+        start: startOfYesterday.toISOString(),
+        end: endOfYesterday.toISOString()
+      });
       
       return result.count;
       
@@ -655,73 +819,83 @@ formatAmount(amount, withSign = false) {
       throw error;
     }
   }
+
   async transferBalancesToInitial() {
     try {
       console.log('🔄 [TRANSFER] Début du transfert des soldes...');
       
-      // Vérifier les soldes AVANT le transfert
-      const accountsBefore = await prisma.account.findMany({
+      // Logs pour debug
+      const accountsBeforeTransfer = await prisma.account.findMany({
         where: {
-          user: { role: 'SUPERVISEUR', status: 'ACTIVE' }
+          userId: {
+            in: await prisma.user.findMany({
+              where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
+              select: { id: true }
+            }).then(users => users.map(u => u.id))
+          }
         },
         select: {
           id: true,
           type: true,
           balance: true,
           initialBalance: true,
+          previousInitialBalance: true,
           user: { select: { nomComplet: true } }
         }
       });
       
-      console.log('📊 [TRANSFER] Soldes AVANT transfert:', 
-        accountsBefore.map(acc => ({
+      console.log(`🔍 [TRANSFER DEBUG] Comptes avant transfert:`, 
+        accountsBeforeTransfer.map(acc => ({
           user: acc.user.nomComplet,
           type: acc.type,
           balance: this.convertFromInt(acc.balance),
-          initialBalance: this.convertFromInt(acc.initialBalance)
+          initialBalance: this.convertFromInt(acc.initialBalance),
+          previousInitialBalance: acc.previousInitialBalance ? this.convertFromInt(acc.previousInitialBalance) : null
         }))
       );
-  
-      // NOUVEAU SQL avec previousInitialBalance
+      
+      // CORRECTION : Transfert de TOUS les soldes, pas seulement ceux > 0
       const result = await prisma.$executeRaw`
         UPDATE accounts 
         SET "previousInitialBalance" = "initialBalance",
             "initialBalance" = balance, 
             balance = 0 
-        WHERE balance > 0 
-        AND "userId" IN (
+        WHERE "userId" IN (
           SELECT id FROM users 
           WHERE role = 'SUPERVISEUR' AND status = 'ACTIVE'
         )
       `;
       
-      console.log('📊 [TRANSFER] Résultat SQL:', result);
-  
-      // Vérifier les soldes APRÈS le transfert
-      const accountsAfter = await prisma.account.findMany({
+      // Logs après transfert
+      const accountsAfterTransfer = await prisma.account.findMany({
         where: {
-          user: { role: 'SUPERVISEUR', status: 'ACTIVE' }
+          userId: {
+            in: await prisma.user.findMany({
+              where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
+              select: { id: true }
+            }).then(users => users.map(u => u.id))
+          }
         },
         select: {
           id: true,
           type: true,
           balance: true,
           initialBalance: true,
-          previousInitialBalance: true, // NOUVEAU CHAMP
+          previousInitialBalance: true,
           user: { select: { nomComplet: true } }
         }
       });
       
-      console.log('📊 [TRANSFER] Soldes APRÈS transfert:', 
-        accountsAfter.map(acc => ({
+      console.log(`✅ [TRANSFER DEBUG] Comptes après transfert:`, 
+        accountsAfterTransfer.map(acc => ({
           user: acc.user.nomComplet,
           type: acc.type,
           balance: this.convertFromInt(acc.balance),
           initialBalance: this.convertFromInt(acc.initialBalance),
-          previousInitialBalance: this.convertFromInt(acc.previousInitialBalance) // NOUVEAU
+          previousInitialBalance: acc.previousInitialBalance ? this.convertFromInt(acc.previousInitialBalance) : null
         }))
       );
-  
+      
       console.log(`✅ [TRANSFER] Transfert terminé pour tous les comptes actifs`);
   
     } catch (error) {
@@ -730,44 +904,6 @@ formatAmount(amount, withSign = false) {
     }
   }
 
-
-// 1. AJOUTER cette fonction dans votre TransactionService (après transferBalancesToInitial)
-
-async getYesterdayBackupData() {
-  try {
-    const today = new Date();
-    const startOfToday = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 0, 0, 0);
-    
-    console.log('🔍 [BACKUP] Recherche données sauvegardées depuis:', startOfToday.toISOString());
-    
-    // Chercher la transaction de sauvegarde d'aujourd'hui
-    const backupTransaction = await prisma.transaction.findFirst({
-      where: {
-        description: { startsWith: '[BACKUP_YESTERDAY]' },
-        createdAt: { gte: startOfToday }
-      },
-      select: { description: true, createdAt: true },
-      orderBy: { createdAt: 'desc' }
-    });
-
-    if (backupTransaction) {
-      console.log('✅ [BACKUP] Données trouvées:', backupTransaction.createdAt);
-      const backupDataStr = backupTransaction.description.replace('[BACKUP_YESTERDAY] ', '');
-      const backupData = JSON.parse(backupDataStr);
-      console.log('📊 [BACKUP] Comptes sauvegardés:', backupData.accounts.length);
-      return backupData.accounts;
-    } else {
-      console.log('❌ [BACKUP] Aucune donnée de sauvegarde trouvée pour aujourd\'hui');
-    }
-
-    return null;
-  } catch (error) {
-    console.error('❌ [BACKUP] Erreur récupération backup yesterday:', error);
-    return null;
-  }
-}
- 
-  
   async getLastResetDate() {
     try {
       const config = await prisma.systemConfig.findFirst({
@@ -814,12 +950,17 @@ async getYesterdayBackupData() {
       console.log('[RESET] Table systemConfig non disponible, utilisation alternative');
       
       try {
+        const adminUser = await prisma.user.findFirst({
+          where: { role: 'ADMIN' },
+          select: { id: true }
+        });
+        
         await prisma.transaction.create({
           data: {
             montant: 0,
             type: 'AUDIT_MODIFICATION',
             description: `[SYSTEM RESET] ${dateString}`,
-            envoyeurId: adminId === 'system' ? 'cmffpzf8e0000248t0hu4w1gr' : adminId // Utiliser un ID réel
+            envoyeurId: adminUser?.id || 'cmffpzf8e0000248t0hu4w1gr'
           }
         });
         console.log(`✅ Date de reset sauvegardée (alternative): ${dateString}`);
@@ -829,395 +970,116 @@ async getYesterdayBackupData() {
     }
   }
 
-
+  // CORRECTION : forceReset optimisé pour CRON Vercel
+  async forceReset(adminId = 'vercel-cron') {
+    try {
+      console.log(`🤖 [CRON RESET ${adminId.toUpperCase()}] Lancement du reset automatique...`);
+      
+      const now = new Date();
+      
+      // ÉTAPE 1 : Archiver les transactions partenaires d'hier
+      console.log('📦 [CRON RESET] Étape 1/4 - Archivage des transactions partenaires...');
+      const archivedCount = await this.archivePartnerTransactionsDynamic();
+      
+      // ÉTAPE 2 : Transférer les soldes (sortie → début)
+      console.log('💰 [CRON RESET] Étape 2/4 - Transfert des soldes...');
+      await this.transferBalancesToInitial();
+      
+      // ÉTAPE 3 : Nettoyage des données temporaires
+      console.log('🧹 [CRON RESET] Étape 3/4 - Nettoyage des données...');
+      const cleanedCount = await this.cleanupDashboardAfterReset();
+      
+      // ÉTAPE 4 : Enregistrer le succès du reset
+      console.log('💾 [CRON RESET] Étape 4/4 - Enregistrement du reset...');
+      const resetKey = `${now.toDateString()}-SUCCESS-${now.getHours()}h${now.getMinutes()}-${adminId}`;
+      await this.saveResetDate(resetKey);
+      
+      // Créer une transaction d'audit
+      const adminUser = await prisma.user.findFirst({
+        where: { role: 'ADMIN' },
+        select: { id: true }
+      });
+      
+      await prisma.transaction.create({
+        data: {
+          montant: 0,
+          type: 'AUDIT_MODIFICATION',
+          description: `Reset automatique ${adminId} - ${archivedCount} archivées, ${cleanedCount} nettoyées`,
+          envoyeurId: adminUser?.id || 'cmffpzf8e0000248t0hu4w1gr'
+        }
+      });
+      
+      console.log(`✅ [CRON RESET ${adminId.toUpperCase()}] Reset terminé avec succès!`);
+      console.log(`📊 [CRON RESET] Résultats: ${archivedCount} transactions archivées, ${cleanedCount} nettoyées`);
+      
+      // ÉTAPE 5 : Envoyer les notifications
+      console.log('📢 [CRON RESET] Envoi des notifications...');
+      const notificationResult = await this.notifyDashboardRefresh({
+        archivedCount,
+        cleanedCount,
+        executedAt: now.toISOString()
+      });
+      
+      console.log(`✅ [CRON RESET] ${notificationResult.successful} notifications envoyées sur ${notificationResult.totalNotifications}`);
+      
+      return {
+        success: true,
+        archivedCount,
+        cleanedCount,
+        executedAt: now.toISOString(),
+        type: adminId,
+        notifications: notificationResult,
+        message: `Reset automatique ${adminId} exécuté avec succès à ${now.toISOString()}`
+      };
+      
+    } catch (error) {
+      console.error(`❌ [CRON RESET ${adminId.toUpperCase()}] Erreur:`, error);
+      
+      // Enregistrer l'erreur
+      try {
+        const now = new Date();
+        const errorKey = `${now.toDateString()}-ERROR-${now.getHours()}h${now.getMinutes()}-${adminId}`;
+        await this.saveResetDate(errorKey);
+      } catch (saveError) {
+        console.error('❌ [CRON RESET] Impossible de sauvegarder l\'erreur:', saveError);
+      }
+      
+      throw error;
+    }
+  }
 
   // =====================================
-// Correction de la méthode getAdminDashboard - lignes 770-950 environ
-
-async getYesterdayDataFromSnapshot() {
-  try {
-    const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(today.getDate() - 1);
-    const yesterdayDate = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
-    
-    console.log('🔍 [SNAPSHOT] Recherche données d\'hier:', yesterdayDate.toISOString());
-    
-    const snapshots = await prisma.dailySnapshot.findMany({
-      where: {
-        date: yesterdayDate
-      },
-      select: {
-        userId: true,
-        liquideDebut: true,
-        orangeMoneyDebut: true,
-        waveDebut: true,
-        uvMasterDebut: true,
-        autresDebut: true,
-        liquideFin: true,
-        orangeMoneyFin: true,
-        waveFin: true,
-        uvMasterFin: true,
-        autresFin: true
-      }
-    });
-    
-    console.log('📊 [SNAPSHOT] Snapshots trouvés:', snapshots.length);
-    return snapshots;
-    
-  } catch (error) {
-    console.error('❌ [SNAPSHOT] Erreur récupération:', error);
-    return [];
-  }
-}
-
-async getAdminDashboard(period = 'today') {
-  try {
-    setImmediate(() => this.checkAndResetDaily());
-    
-    const dateFilter = this.getDateFilter(period);
-    const includeArchived = this.shouldIncludeArchivedTransactions(period);
-    
-    // Déterminer si on affiche les soldes actuels ou les anciens soldes
-    const resetConfig = this.getResetConfig();
-    const now = new Date();
-    const todayResetTime = new Date(now);
-    todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
-    const afterReset = now > todayResetTime;
-    
-    // FILTRAGE TRANSACTIONS CORRIGÉ
-    let transactionFilter = { createdAt: dateFilter };
-
-    if (period === 'yesterday') {
-      if (afterReset) {
-        // Après reset: uniquement les transactions archivées d'hier
-        transactionFilter = {
-          ...transactionFilter,
-          archived: true,
-          archivedAt: {
-            gte: todayResetTime,
-            lte: new Date(todayResetTime.getTime() + 5 * 60 * 1000) // Dans les 5 min du reset
-          }
-        };
-      } else {
-        // Avant reset: transactions non archivées d'hier
-        transactionFilter = {
-          ...transactionFilter,
-          OR: [
-            { archived: { equals: false } },
-            { archived: { equals: null } }
-          ]
-        };
-      }
-    } else if (period === 'today') {
-      // Pour "today": toujours exclure les archivées
-      transactionFilter = {
-        ...transactionFilter,
-        OR: [
-          { archived: { equals: false } },
-          { archived: { equals: null } }
-        ]
-      };
-    }
-
-    console.log(`📊 [DASHBOARD FIXED] Période: ${period}, Après reset: ${afterReset}`, {
-      dateFilter,
-      includeArchived,
-      transactionFilter,
-      resetConfig
-    });
-
-    // RÉCUPÉRATION DES SUPERVISEURS AVANT UTILISATION
-    const supervisors = await prisma.user.findMany({
-      where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
-      select: {
-        id: true,
-        nomComplet: true,
-        status: true,
-        accounts: {
-          select: {
-            type: true,
-            balance: true,
-            initialBalance: true,
-            previousInitialBalance: true // NOUVEAU CHAMP
-          }
-        },
-        transactionsRecues: {
-          where: transactionFilter,
-          select: {
-            id: true,
-            type: true,
-            montant: true,
-            partenaireId: true,
-            archived: true,
-            archivedAt: true,
-            createdAt: true,
-            partenaire: {
-              select: { nomComplet: true }
-            }
-          }
-        }
-      },
-      orderBy: { nomComplet: 'asc' }
-    });
-
-    // REQUÊTE AVEC DONNÉES HISTORIQUES pour "yesterday" après reset
-    let historicalAccountData = null;
-    if (period === 'yesterday' && afterReset) {
-      console.log('📊 [HISTORICAL] Récupération des données de comptes d\'hier...');
+  // MÉTHODES DASHBOARD SANS AUTO-RESET
+  // =====================================
+  async getAdminDashboard(period = 'today', customDate = null) {
+    try {
+      // CORRECTION : Plus de vérification automatique - le CRON Vercel s'en charge
+      console.log(`📊 [ADMIN DASHBOARD] Période: ${period}, Date: ${customDate}`);
       
-      historicalAccountData = await prisma.account.findMany({
-        where: {
-          userId: { in: supervisors.map(s => s.id) }
-        },
-        select: {
-          userId: true,
-          type: true,
-          initialBalance: true, // Anciens soldes de sortie d'hier
-          previousInitialBalance: true, // NOUVEAU - Anciens soldes de début d'hier
-          balance: true // Nouveaux soldes (0 après reset)
-        }
+      const dateFilter = this.getDateFilter(period, customDate);
+      const includeArchived = await this.shouldIncludeArchivedTransactions(period, customDate);
+      
+      console.log(`📊 [ADMIN DASHBOARD] Filtre date:`, {
+        start: dateFilter.gte?.toISOString(),
+        end: dateFilter.lte?.toISOString(),
+        includeArchived
       });
       
-      console.log('📊 [HISTORICAL] Données historiques trouvées:', 
-        historicalAccountData.map(acc => ({
-          userId: acc.userId,
-          type: acc.type,
-          yesterdayStart: this.convertFromInt(acc.previousInitialBalance || 0),
-          yesterdayEnd: this.convertFromInt(acc.initialBalance)
-        }))
-      );
-    }
+      // Filtre de transactions basé sur reset réel via CRON
+      let transactionFilter = { createdAt: dateFilter };
 
-    let totalDebutGlobal = 0;
-    let totalSortieGlobal = 0;
-    let uvMasterSolde = 0;
-    let uvMasterSorties = 0;
-
-    // TRAITEMENT AVEC LOGIQUE DE COMPTES CORRIGÉE
-    const supervisorCards = supervisors.map(supervisor => {
-      const accountsByType = { debut: {}, sortie: {} };
-      let uvMasterTotal = 0;
-
-      // LOGIQUE SIMPLE CORRIGÉE : Pour "yesterday" après reset, utiliser previousInitialBalance
-      if (period === 'yesterday' && afterReset && historicalAccountData) {
-        console.log(`📊 [HISTORICAL SUPERVISOR] ${supervisor.nomComplet}`);
+      if (includeArchived) {
+        const now = new Date();
+        const resetConfig = this.getResetConfig();
+        const todayResetTime = new Date(now);
+        todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
         
-        // Trouver les comptes historiques de ce superviseur
-        const supervisorHistoricalAccounts = historicalAccountData.filter(acc => 
-          acc.userId === supervisor.id
-        );
-
-        // LOGIQUE SIMPLE : Utiliser les champs de la base de données directement
-        supervisor.accounts.forEach(account => {
-          const historicalAccount = supervisorHistoricalAccounts.find(hist => 
-            hist.userId === supervisor.id && hist.type === account.type
-          );
-          
-          if (historicalAccount) {
-            // Pour yesterday après reset :
-            // - debut d'hier = previousInitialBalance (ancien solde de début sauvegardé)
-            // - sortie d'hier = initialBalance (ancien solde de sortie transféré)
-            const ancienDebutHier = this.convertFromInt(historicalAccount.previousInitialBalance || 0);
-            const ancienneSortieHier = this.convertFromInt(historicalAccount.initialBalance);
-            
-            accountsByType.debut[account.type] = ancienDebutHier;
-            accountsByType.sortie[account.type] = ancienneSortieHier;
-            
-            console.log(`📊 [${supervisor.nomComplet}] ${account.type}: début=${ancienDebutHier}, sortie=${ancienneSortieHier}`);
-            
-            if (account.type === 'UV_MASTER') {
-              uvMasterTotal += ancienneSortieHier;
-              uvMasterSorties += ancienneSortieHier;
-              uvMasterSolde += ancienDebutHier;
-            }
-          } else {
-            accountsByType.debut[account.type] = 0;
-            accountsByType.sortie[account.type] = 0;
-          }
-        });
-
-        // Compléter les types manquants
-        ['LIQUIDE', 'ORANGE_MONEY', 'WAVE', 'UV_MASTER', 'AUTRES'].forEach(accountType => {
-          if (!accountsByType.debut.hasOwnProperty(accountType)) {
-            accountsByType.debut[accountType] = 0;
-          }
-          if (!accountsByType.sortie.hasOwnProperty(accountType)) {
-            accountsByType.sortie[accountType] = 0;
-          }
-        });
-
-      } else {
-        // LOGIQUE NORMALE pour today et autres périodes
-        supervisor.accounts.forEach(account => {
-          const initial = this.convertFromInt(account.initialBalance);
-          const current = this.convertFromInt(account.balance);
-          
-          if (account.type === 'UV_MASTER') {
-            uvMasterTotal += current;
-            accountsByType.sortie['UV_MASTER'] = current;
-            uvMasterSorties += current;
-            uvMasterSolde += initial;
-            accountsByType.debut['UV_MASTER'] = initial;
-          } else {
-            accountsByType.debut[account.type] = initial;
-            accountsByType.sortie[account.type] = current;
-          }
-        });
-      }
-
-      // TRAITEMENT PARTENAIRES (inchangé mais avec filtrage correct)
-      const partenaireTransactions = {};
-      
-      supervisor.transactionsRecues.forEach(tx => {
-        if (tx.partenaireId && tx.partenaire) {
-          const montant = this.convertFromInt(tx.montant);
-          const partnerName = tx.partenaire.nomComplet;
-          
-          if (!partenaireTransactions[partnerName]) {
-            partenaireTransactions[partnerName] = { depots: 0, retraits: 0 };
-          }
-          
-          if (tx.type === 'DEPOT') {
-            partenaireTransactions[partnerName].depots += montant;
-          } else if (tx.type === 'RETRAIT') {
-            partenaireTransactions[partnerName].retraits += montant;
-          }
-        }
-      });
-
-      // Ajouter aux comptes
-      Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
-        if (amounts.depots > 0) {
-          accountsByType.debut[`part-${partnerName}`] = amounts.depots;
-        }
-        if (amounts.retraits > 0) {
-          accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
-        }
-      });
-
-      // Calculer totaux
-      const debutTotal = Object.values(accountsByType.debut).reduce((sum, val) => sum + val, 0);
-      const sortieTotal = Object.values(accountsByType.sortie).reduce((sum, val) => sum + val, 0);
-      const grTotal = sortieTotal - debutTotal;
-
-      totalDebutGlobal += debutTotal;
-      totalSortieGlobal += sortieTotal;
-
-      return {
-        id: supervisor.id,
-        nom: supervisor.nomComplet,
-        status: supervisor.status,
-        comptes: {
-          debut: accountsByType.debut,
-          sortie: accountsByType.sortie
-        },
-        totaux: {
-          debutTotal,
-          sortieTotal,
-          grTotal,
-          formatted: {
-            debutTotal: this.formatAmount(debutTotal),
-            sortieTotal: this.formatAmount(sortieTotal),
-            grTotal: this.formatAmount(grTotal, true)
-          }
-        }
-      };
-    });
-
-    // Totaux globaux
-    const globalTotals = {
-      uvMaster: {
-        solde: uvMasterSolde,
-        sorties: uvMasterSorties,
-        formatted: {
-          solde: this.formatAmount(uvMasterSolde),
-          sorties: this.formatAmount(uvMasterSorties)
-        }
-      },
-      debutTotalGlobal: totalDebutGlobal,
-      sortieTotalGlobal: totalSortieGlobal,
-      formatted: {
-        debutTotalGlobal: this.formatAmount(totalDebutGlobal),
-        sortieTotalGlobal: this.formatAmount(totalSortieGlobal)
-      }
-    };
-
-    return {
-      period,
-      globalTotals,
-      supervisorCards,
-      dynamicConfig: {
-        resetConfig: this.getResetConfig(),
-        includeArchived,
-        afterReset,
-        filterApplied: includeArchived ? 'archived_included' : 'archived_excluded',
-        dataSource: (period === 'yesterday' && afterReset) ? 'previousInitialBalance' : 'current'
-      }
-    };
-
-  } catch (error) {
-    console.error('Erreur getAdminDashboard:', error);
-    throw error;
-  }
-}
- async getSupervisorDashboard(superviseurId, period = 'today', forceRefresh = false) {
-  try {
-    // Vérifier reset si pas un refresh forcé
-    if (!forceRefresh) {
-      const resetResult = await this.checkAndResetDaily();
-      
-      // Si reset détecté, programmer une actualisation
-      if (resetResult?.success) {
-        console.log('🔄 [AUTO-REFRESH SUPERVISOR] Reset détecté, actualisation dans 60 secondes...');
-        setTimeout(async () => {
-          try {
-            await this.getSupervisorDashboard(superviseurId, period, true);
-          } catch (refreshError) {
-            console.error('❌ [AUTO-REFRESH SUPERVISOR] Erreur:', refreshError);
-          }
-        }, 60000);
-      }
-    }
-    
-    const dateFilter = this.getDateFilter(period);
-    const includeArchived = this.shouldIncludeArchivedTransactions(period);
-    
-    // Déterminer le contexte de reset
-    const resetConfig = this.getResetConfig();
-    const now = new Date();
-    const todayResetTime = new Date(now);
-    todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
-    const afterReset = now > todayResetTime;
-
-    console.log(`🔍 [SUPERVISOR DASHBOARD FIXED] Période: ${period}, Après reset: ${afterReset}`, {
-      superviseurId,
-      includeArchived,
-      afterReset
-    });
-
-    // FILTRAGE IDENTIQUE à getAdminDashboard
-    let transactionFilter = { 
-      createdAt: dateFilter,
-      AND: [
-        {
-          OR: [
-            { envoyeurId: superviseurId },
-            { destinataireId: superviseurId },
-            { partenaireId: superviseurId }
-          ]
-        }
-      ]
-    };
-
-    if (period === 'yesterday') {
-      if (afterReset) {
         transactionFilter = {
           ...transactionFilter,
           archived: true,
           archivedAt: {
-            gte: todayResetTime,
-            lte: new Date(todayResetTime.getTime() + 5 * 60 * 1000)
+            gte: new Date(todayResetTime.getTime() - 60 * 1000),
+            lte: new Date(todayResetTime.getTime() + 10 * 60 * 1000)
           }
         };
       } else {
@@ -1229,19 +1091,12 @@ async getAdminDashboard(period = 'today') {
           ]
         };
       }
-    } else if (period === 'today') {
-      transactionFilter = {
-        ...transactionFilter,
-        OR: [
-          { archived: { equals: false } },
-          { archived: { equals: null } }
-        ]
-      };
-    }
 
-    const [supervisor, allTransactions, uvMasterAccounts] = await Promise.all([
-      prisma.user.findUnique({
-        where: { id: superviseurId },
+      console.log(`📊 [ADMIN DASHBOARD] Filtre transactions final:`, transactionFilter);
+
+      // Récupération des superviseurs
+      const supervisors = await prisma.user.findMany({
+        where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
         select: {
           id: true,
           nomComplet: true,
@@ -1251,245 +1106,402 @@ async getAdminDashboard(period = 'today') {
               type: true,
               balance: true,
               initialBalance: true,
-              previousInitialBalance: true // NOUVEAU CHAMP
+              previousInitialBalance: true
+            }
+          },
+          transactionsRecues: {
+            where: transactionFilter,
+            select: {
+              id: true,
+              type: true,
+              montant: true,
+              partenaireId: true,
+              archived: true,
+              archivedAt: true,
+              createdAt: true,
+              partenaire: {
+                select: { nomComplet: true }
+              }
             }
           }
-        }
-      }),
-      prisma.transaction.findMany({
-        where: transactionFilter,
-        select: {
-          id: true,
-          type: true,
-          montant: true,
-          description: true,
-          createdAt: true,
-          envoyeurId: true,
-          destinataireId: true,
-          partenaireId: true,
-          archived: true,
-          destinataire: { select: { nomComplet: true, role: true } },
-          envoyeur: { select: { nomComplet: true, role: true } },
-          partenaire: { select: { id: true, nomComplet: true } }
         },
-        orderBy: { createdAt: 'desc' },
-        take: 50
-      }),
-      prisma.account.findMany({
-        where: {
-          type: 'UV_MASTER',
-          user: { role: 'SUPERVISEUR', status: 'ACTIVE' }
+        orderBy: { nomComplet: 'asc' }
+      });
+
+      console.log(`📊 [ADMIN DASHBOARD] ${supervisors.length} superviseurs trouvés`);
+
+      // Cas spécial : date personnalisée sans données
+      if (period === 'custom' && supervisors.every(s => s.transactionsRecues.length === 0)) {
+        console.log(`📊 [CUSTOM DATE] Aucune donnée trouvée pour ${customDate}`);
+        
+        return {
+          period,
+          customDate,
+          globalTotals: {
+            uvMaster: { solde: 0, sorties: 0, formatted: { solde: "0 F", sorties: "0 F" } },
+            debutTotalGlobal: 0, sortieTotalGlobal: 0, grTotalGlobal: 0,
+            formatted: { debutTotalGlobal: "0 F", sortieTotalGlobal: "0 F", grTotalGlobal: "0 F" }
+          },
+          supervisorCards: supervisors.map(supervisor => ({
+            id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status,
+            comptes: { debut: {}, sortie: {} },
+            totaux: {
+              debutTotal: 0, sortieTotal: 0, grTotal: 0,
+              formatted: { debutTotal: "0 F", sortieTotal: "0 F", grTotal: "0 F" }
+            }
+          })),
+          dynamicConfig: {
+            resetConfig: this.getResetConfig(), includeArchived,
+            targetDateTime: customDate, filterApplied: 'archived_excluded', dataSource: 'empty'
+          }
+        };
+      }
+
+      // Traitement des superviseurs
+      let totalDebutGlobal = 0, totalSortieGlobal = 0, uvMasterSolde = 0, uvMasterSorties = 0;
+
+      const supervisorCards = supervisors.map(supervisor => {
+        const accountsByType = { debut: {}, sortie: {} };
+
+        // CORRECTION : Logique basée sur reset réel via CRON
+        if (includeArchived && period === 'yesterday') {
+          // Hier après reset CRON : utiliser previousInitialBalance et initialBalance
+          supervisor.accounts.forEach(account => {
+            const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
+            const ancienneSortieHier = this.convertFromInt(account.initialBalance || 0);
+            
+            accountsByType.debut[account.type] = ancienDebutHier;
+            accountsByType.sortie[account.type] = ancienneSortieHier;
+            
+            if (account.type === 'UV_MASTER') {
+              uvMasterSorties += ancienneSortieHier;
+              uvMasterSolde += ancienDebutHier;
+            }
+          });
+        } else {
+          // Logique normale : utiliser initialBalance et balance
+          supervisor.accounts.forEach(account => {
+            const initial = this.convertFromInt(account.initialBalance || 0);
+            const current = this.convertFromInt(account.balance || 0);
+            
+            accountsByType.debut[account.type] = initial;
+            accountsByType.sortie[account.type] = current;
+            
+            if (account.type === 'UV_MASTER') {
+              uvMasterSorties += current;
+              uvMasterSolde += initial;
+            }
+          });
+        }
+
+        // Traitement des transactions partenaires
+        const partenaireTransactions = {};
+        supervisor.transactionsRecues.forEach(tx => {
+          if (tx.partenaireId && tx.partenaire) {
+            const montant = this.convertFromInt(tx.montant);
+            const partnerName = tx.partenaire.nomComplet;
+            
+            if (!partenaireTransactions[partnerName]) {
+              partenaireTransactions[partnerName] = { depots: 0, retraits: 0 };
+            }
+            
+            if (tx.type === 'DEPOT') {
+              partenaireTransactions[partnerName].depots += montant;
+            } else if (tx.type === 'RETRAIT') {
+              partenaireTransactions[partnerName].retraits += montant;
+            }
+          }
+        });
+
+        // Ajouter partenaires aux comptes
+        Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
+          if (amounts.depots > 0) {
+            accountsByType.debut[`part-${partnerName}`] = amounts.depots;
+          }
+          if (amounts.retraits > 0) {
+            accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
+          }
+        });
+
+        // Calculer totaux
+        const debutTotal = Object.values(accountsByType.debut).reduce((sum, val) => sum + val, 0);
+        const sortieTotal = Object.values(accountsByType.sortie).reduce((sum, val) => sum + val, 0);
+        const grTotal = sortieTotal - debutTotal;
+
+        totalDebutGlobal += debutTotal;
+        totalSortieGlobal += sortieTotal;
+
+        return {
+          id: supervisor.id,
+          nom: supervisor.nomComplet,
+          status: supervisor.status,
+          comptes: accountsByType,
+          totaux: {
+            debutTotal, sortieTotal, grTotal,
+            formatted: {
+              debutTotal: this.formatAmount(debutTotal),
+              sortieTotal: this.formatAmount(sortieTotal),
+              grTotal: this.formatAmount(grTotal, true)
+            }
+          }
+        };
+      });
+
+      const globalTotals = {
+        uvMaster: {
+          solde: uvMasterSolde, sorties: uvMasterSorties,
+          formatted: { solde: this.formatAmount(uvMasterSolde), sorties: this.formatAmount(uvMasterSorties) }
         },
-        select: {
-          balance: true,
-          initialBalance: true,
-          previousInitialBalance: true // NOUVEAU CHAMP
+        debutTotalGlobal: totalDebutGlobal, sortieTotalGlobal: totalSortieGlobal,
+        grTotalGlobal: totalSortieGlobal - totalDebutGlobal,
+        formatted: {
+          debutTotalGlobal: this.formatAmount(totalDebutGlobal),
+          sortieTotalGlobal: this.formatAmount(totalSortieGlobal),
+          grTotalGlobal: this.formatAmount(totalSortieGlobal - totalDebutGlobal, true)
         }
-      })
-    ]);
+      };
 
-    if (!supervisor) {
-      throw new Error('Superviseur non trouvé');
-    }
-
-    // LOGIQUE DE COMPTES CORRIGÉE (même logique que getAdminDashboard)
-    const accountsByType = { debut: {}, sortie: {} };
-    let totalDebutPersonnel = 0;
-    let totalSortiePersonnel = 0;
-
-    // Pour "yesterday" après reset, utiliser previousInitialBalance
-    if (period === 'yesterday' && afterReset) {
-      console.log('📊 [HISTORICAL SUPERVISOR] Récupération des données historiques...');
-      
-      // Récupérer les comptes avec les anciens soldes (même logique que getAdminDashboard)
-      const historicalAccounts = await prisma.account.findMany({
-        where: { userId: superviseurId },
-        select: {
-          type: true,
-          initialBalance: true, // Anciens soldes de sortie d'hier
-          previousInitialBalance: true, // NOUVEAU - Anciens soldes de début d'hier
-          balance: true // Maintenant 0 après reset
-        }
+      console.log(`📊 [ADMIN DASHBOARD] Résultats:`, {
+        supervisorCount: supervisorCards.length,
+        transactionSource: includeArchived ? 'archived' : 'current',
+        totalDebut: totalDebutGlobal, totalSortie: totalSortieGlobal
       });
-      
-      console.log('📊 [HISTORICAL SUPERVISOR] Comptes historiques:', 
-        historicalAccounts.map(acc => ({
-          type: acc.type,
-          yesterdayStart: this.convertFromInt(acc.previousInitialBalance || 0),
-          yesterdayEnd: this.convertFromInt(acc.initialBalance)
-        }))
-      );
-      
-      historicalAccounts.forEach(account => {
-        // MÊME LOGIQUE que getAdminDashboard
-        const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
-        const ancienneSortieHier = this.convertFromInt(account.initialBalance);
-        
-        accountsByType.debut[account.type] = ancienDebutHier;
-        accountsByType.sortie[account.type] = ancienneSortieHier;
-        
-        totalDebutPersonnel += ancienDebutHier;
-        totalSortiePersonnel += ancienneSortieHier;
-        
-        console.log(`📊 [${supervisor.nomComplet}] ${account.type}: début=${ancienDebutHier}, sortie=${ancienneSortieHier}`);
-      });
-      
-    } else {
-      // Logique normale avec les comptes actuels
-      supervisor.accounts.forEach(account => {
-        const initial = this.convertFromInt(account.initialBalance);
-        const current = this.convertFromInt(account.balance);
-
-        accountsByType.debut[account.type] = initial;
-        accountsByType.sortie[account.type] = current;
-        
-        totalDebutPersonnel += initial;
-        totalSortiePersonnel += current;
-      });
-    }
-
-    // TRAITEMENT PARTENAIRES (inchangé)
-    const partenaireTransactions = {};
-    
-    allTransactions.forEach(tx => {
-      if (tx.partenaireId && tx.partenaire) {
-        const montant = this.convertFromInt(tx.montant);
-        const partnerName = tx.partenaire.nomComplet;
-        
-        if (!partenaireTransactions[partnerName]) {
-          partenaireTransactions[partnerName] = { depots: 0, retraits: 0 };
-        }
-        
-        if (tx.type === 'DEPOT') {
-          if (tx.destinataireId === superviseurId) {
-            partenaireTransactions[partnerName].depots += montant;
-            // ATTENTION: Pour yesterday après reset, ne pas ajouter aux totaux car c'est dans les snapshots
-            if (!(period === 'yesterday' && afterReset)) {
-              totalDebutPersonnel += montant;
-            }
-          }
-        } else if (tx.type === 'RETRAIT') {
-          if (tx.destinataireId === superviseurId) {
-            partenaireTransactions[partnerName].retraits += montant;
-            // ATTENTION: Pour yesterday après reset, ne pas ajouter aux totaux car c'est dans les snapshots
-            if (!(period === 'yesterday' && afterReset)) {
-              totalSortiePersonnel += montant;
-            }
-          }
-        }
-      }
-    });
-
-    // Ajouter aux comptes
-    Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
-      if (amounts.depots > 0) {
-        accountsByType.debut[`part-${partnerName}`] = amounts.depots;
-      }
-      if (amounts.retraits > 0) {
-        accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
-      }
-    });
-
-    // UV MASTER GLOBAL (avec la même logique que getAdminDashboard)
-    let uvMasterDebut, uvMasterSortie;
-    
-    if (period === 'yesterday' && afterReset) {
-      // Pour yesterday après reset, utiliser les données historiques globales
-      uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
-        total + this.convertFromInt(account.previousInitialBalance || 0), 0);
-      uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
-        total + this.convertFromInt(account.initialBalance), 0);
-    } else {
-      // Logique normale
-      uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
-        total + this.convertFromInt(account.initialBalance), 0);
-      uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
-        total + this.convertFromInt(account.balance), 0);
-    }
-
-    const grTotal = totalSortiePersonnel - totalDebutPersonnel;
-
-    // FORMATAGE TRANSACTIONS (inchangé)
-    const recentTransactions = allTransactions.map(tx => {
-      let personne = '';
-      
-      if (tx.partenaireId && tx.partenaire) {
-        personne = `${tx.partenaire.nomComplet} (Partenaire)`;
-      } else if (tx.envoyeurId === superviseurId) {
-        personne = tx.destinataire?.nomComplet || 'Destinataire inconnu';
-      } else if (tx.destinataireId === superviseurId) {
-        personne = tx.envoyeur?.nomComplet || 'Expéditeur inconnu';
-      }
-
-      if (['DEBUT_JOURNEE', 'FIN_JOURNEE'].includes(tx.type)) {
-        personne = supervisor.nomComplet;
-      }
 
       return {
-        id: tx.id,
-        type: tx.type,
-        montant: this.convertFromInt(tx.montant),
-        description: tx.description,
-        personne,
-        createdAt: tx.createdAt,
-        envoyeurId: tx.envoyeurId,
-        destinataireId: tx.destinataireId,
-        partenaireId: tx.partenaireId,
-        archived: tx.archived
-      };
-    });
-
-    return {
-      superviseur: {
-        id: supervisor.id,
-        nom: supervisor.nomComplet,
-        status: supervisor.status
-      },
-      period,
-      uvMaster: {
-        personal: {
-          debut: uvMasterDebut,
-          sortie: uvMasterSortie,
-          formatted: uvMasterSortie.toLocaleString() + ' F'
-        },
-        total: uvMasterSortie,
-        debut: uvMasterDebut,
-        formatted: uvMasterSortie.toLocaleString() + ' F'
-      },
-      comptes: accountsByType,
-      totaux: {
-        debutTotal: totalDebutPersonnel,
-        sortieTotal: totalSortiePersonnel,
-        grTotal,
-        formatted: {
-          debutTotal: totalDebutPersonnel.toLocaleString() + ' F',
-          sortieTotal: totalSortiePersonnel.toLocaleString() + ' F',
-          grTotal: this.formatAmount(grTotal, true)
+        period, customDate, globalTotals, supervisorCards,
+        dynamicConfig: {
+          resetConfig: this.getResetConfig(), includeArchived,
+          targetDateTime: customDate,
+          filterApplied: includeArchived ? 'archived_included' : 'archived_excluded',
+          dataSource: includeArchived ? 'historical_after_reset' : 'current_live',
+          cronStatus: 'Vercel CRON géré automatiquement'
         }
-      },
-      recentTransactions,
-      dynamicConfig: {
-        period,
-        resetConfig: this.getResetConfig(),
-        includeArchived,
-        afterReset,
-        totalTransactionsFound: allTransactions.length,
-        partnerTransactionsFound: allTransactions.filter(tx => tx.partenaireId).length,
-        filterApplied: includeArchived ? 'archived_included' : 'archived_excluded',
-        dataSource: (period === 'yesterday' && afterReset) ? 'previousInitialBalance' : 'current'
-      }
-    };
+      };
 
-  } catch (error) {
-    console.error('Erreur getSupervisorDashboard:', error);
-    throw new Error('Erreur lors de la récupération du dashboard superviseur: ' + error.message);
+    } catch (error) {
+      console.error('Erreur getAdminDashboard:', error);
+      throw error;
+    }
   }
-}
-  
 
-  async getPartnerDashboard(partenaireId, period = 'today') {
+  async getSupervisorDashboard(superviseurId, period = 'today', customDate = null) {
     try {
-      const dateFilter = this.getDateFilter(period);
+      // CORRECTION : Plus de vérification automatique - le CRON Vercel s'en charge
+      const dateFilter = this.getDateFilter(period, customDate);
+      const includeArchived = await this.shouldIncludeArchivedTransactions(period, customDate);
+      
+      console.log(`📊 [SUPERVISOR DASHBOARD] Superviseur: ${superviseurId}, Include archived: ${includeArchived}`);
+      
+      // Filtre transactions identique à getAdminDashboard
+      let transactionFilter = { 
+        createdAt: dateFilter,
+        AND: [{ OR: [{ envoyeurId: superviseurId }, { destinataireId: superviseurId }] }]
+      };
+
+      if (includeArchived) {
+        const resetConfig = this.getResetConfig();
+        const now = new Date();
+        const todayResetTime = new Date(now);
+        todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+        
+        transactionFilter = {
+          ...transactionFilter,
+          archived: true,
+          archivedAt: {
+            gte: new Date(todayResetTime.getTime() - 60 * 1000),
+            lte: new Date(todayResetTime.getTime() + 10 * 60 * 1000)
+          }
+        };
+      } else {
+        transactionFilter = {
+          ...transactionFilter,
+          OR: [{ archived: { equals: false } }, { archived: { equals: null } }]
+        };
+      }
+
+      const [supervisor, allTransactions, uvMasterAccounts] = await Promise.all([
+        prisma.user.findUnique({
+          where: { id: superviseurId },
+          select: {
+            id: true, nomComplet: true, status: true,
+            accounts: {
+              select: {
+                type: true, balance: true, initialBalance: true, previousInitialBalance: true
+              }
+            }
+          }
+        }),
+        prisma.transaction.findMany({
+          where: transactionFilter,
+          select: {
+            id: true, type: true, montant: true, description: true, createdAt: true,
+            envoyeurId: true, destinataireId: true, partenaireId: true, archived: true,
+            destinataire: { select: { nomComplet: true } },
+            envoyeur: { select: { nomComplet: true } },
+            partenaire: { select: { nomComplet: true } }
+          },
+          orderBy: { createdAt: 'desc' }, take: 50
+        }),
+        prisma.account.findMany({
+          where: { type: 'UV_MASTER', user: { role: 'SUPERVISEUR', status: 'ACTIVE' } },
+          select: { balance: true, initialBalance: true, previousInitialBalance: true }
+        })
+      ]);
+
+      if (!supervisor) throw new Error('Superviseur non trouvé');
+
+      // Cas spécial : date personnalisée sans données
+      if (period === 'custom' && allTransactions.length === 0) {
+        return {
+          superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
+          period, customDate,
+          uvMaster: { personal: { debut: 0, sortie: 0, formatted: "0 F" }, total: 0, formatted: "0 F" },
+          comptes: { debut: {}, sortie: {} },
+          totaux: {
+            debutTotal: 0, sortieTotal: 0, grTotal: 0,
+            formatted: { debutTotal: "0 F", sortieTotal: "0 F", grTotal: "0 F" }
+          },
+          recentTransactions: [],
+          dynamicConfig: {
+            period, customDate, resetConfig: this.getResetConfig(), includeArchived,
+            totalTransactionsFound: 0, filterApplied: 'archived_excluded', dataSource: 'empty'
+          }
+        };
+      }
+
+      const accountsByType = { debut: {}, sortie: {} };
+      let totalDebutPersonnel = 0, totalSortiePersonnel = 0;
+
+      // CORRECTION : Logique identique à getAdminDashboard
+      if (includeArchived && period === 'yesterday') {
+        supervisor.accounts.forEach(account => {
+          const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
+          const ancienneSortieHier = this.convertFromInt(account.initialBalance || 0);
+          
+          accountsByType.debut[account.type] = ancienDebutHier;
+          accountsByType.sortie[account.type] = ancienneSortieHier;
+          
+          totalDebutPersonnel += ancienDebutHier;
+          totalSortiePersonnel += ancienneSortieHier;
+        });
+      } else {
+        supervisor.accounts.forEach(account => {
+          const initial = this.convertFromInt(account.initialBalance || 0);
+          const current = this.convertFromInt(account.balance || 0);
+
+          accountsByType.debut[account.type] = initial;
+          accountsByType.sortie[account.type] = current;
+          
+          totalDebutPersonnel += initial;
+          totalSortiePersonnel += current;
+        });
+      }
+
+      // Traitement des transactions partenaires
+      const partenaireTransactions = {};
+      allTransactions.forEach(tx => {
+        if (tx.partenaireId && tx.partenaire) {
+          const montant = this.convertFromInt(tx.montant);
+          const partnerName = tx.partenaire.nomComplet;
+          
+          if (!partenaireTransactions[partnerName]) {
+            partenaireTransactions[partnerName] = { depots: 0, retraits: 0 };
+          }
+          
+          if (tx.type === 'DEPOT' && tx.destinataireId === superviseurId) {
+            partenaireTransactions[partnerName].depots += montant;
+          } else if (tx.type === 'RETRAIT' && tx.destinataireId === superviseurId) {
+            partenaireTransactions[partnerName].retraits += montant;
+          }
+        }
+      });
+
+      // Ajouter partenaires aux comptes ET totaux
+      Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
+        if (amounts.depots > 0) {
+          accountsByType.debut[`part-${partnerName}`] = amounts.depots;
+          totalDebutPersonnel += amounts.depots;
+        }
+        if (amounts.retraits > 0) {
+          accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
+          totalSortiePersonnel += amounts.retraits;
+        }
+      });
+
+      // UV MASTER global
+      let uvMasterDebut, uvMasterSortie;
+      if (includeArchived && period === 'yesterday') {
+        uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
+          total + this.convertFromInt(account.previousInitialBalance || 0), 0);
+        uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
+          total + this.convertFromInt(account.initialBalance || 0), 0);
+      } else {
+        uvMasterDebut = uvMasterAccounts.reduce((total, account) => 
+          total + this.convertFromInt(account.initialBalance || 0), 0);
+        uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
+          total + this.convertFromInt(account.balance || 0), 0);
+      }
+
+      const grTotal = totalSortiePersonnel - totalDebutPersonnel;
+
+      // Formatage des transactions récentes
+      const recentTransactions = allTransactions.map(tx => {
+        let personne = '';
+        if (tx.partenaireId && tx.partenaire) {
+          personne = `${tx.partenaire.nomComplet} (Partenaire)`;
+        } else if (tx.envoyeurId === superviseurId) {
+          personne = tx.destinataire?.nomComplet || 'Destinataire inconnu';
+        } else if (tx.destinataireId === superviseurId) {
+          personne = tx.envoyeur?.nomComplet || 'Expéditeur inconnu';
+        }
+        if (['DEBUT_JOURNEE', 'FIN_JOURNEE'].includes(tx.type)) {
+          personne = supervisor.nomComplet;
+        }
+
+        return {
+          id: tx.id, type: tx.type, montant: this.convertFromInt(tx.montant),
+          description: tx.description, personne, createdAt: tx.createdAt,
+          envoyeurId: tx.envoyeurId, destinataireId: tx.destinataireId,
+          partenaireId: tx.partenaireId, archived: tx.archived
+        };
+      });
+
+      return {
+        superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
+        period, customDate,
+        uvMaster: {
+          personal: { debut: uvMasterDebut, sortie: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F' },
+          total: uvMasterSortie, formatted: uvMasterSortie.toLocaleString() + ' F'
+        },
+        comptes: accountsByType,
+        totaux: {
+          debutTotal: totalDebutPersonnel, sortieTotal: totalSortiePersonnel, grTotal,
+          formatted: {
+            debutTotal: totalDebutPersonnel.toLocaleString() + ' F',
+            sortieTotal: totalSortiePersonnel.toLocaleString() + ' F',
+            grTotal: this.formatAmount(grTotal, true)
+          }
+        },
+        recentTransactions,
+        dynamicConfig: {
+          period, customDate, resetConfig: this.getResetConfig(), includeArchived,
+          totalTransactionsFound: allTransactions.length,
+          partnerTransactionsFound: allTransactions.filter(tx => tx.partenaireId).length,
+          filterApplied: includeArchived ? 'archived_included' : 'archived_excluded',
+          dataSource: includeArchived ? 'historical_after_reset' : 'current_live',
+          cronStatus: 'Vercel CRON géré automatiquement'
+        }
+      };
+
+    } catch (error) {
+      console.error('Erreur getSupervisorDashboard:', error);
+      throw new Error('Erreur lors de la récupération du dashboard superviseur: ' + error.message);
+    }
+  }
+
+  async getPartnerDashboard(partenaireId, period = 'today', customDate = null) {
+    try {
+      const dateFilter = this.getDateFilter(period, customDate);
 
       const [partner, availableSupervisors] = await Promise.all([
         prisma.user.findUnique({
@@ -1553,6 +1565,7 @@ async getAdminDashboard(period = 'today') {
           nom: partner.nomComplet
         },
         period,
+        customDate,
         statistiques: {
           totalDepots,
           totalRetraits,
@@ -1575,9 +1588,8 @@ async getAdminDashboard(period = 'today') {
   }
 
   // =====================================
-  // AUTRES MÉTHODES
+  // AUTRES MÉTHODES UTILITAIRES
   // =====================================
-
   async updateTransaction(transactionId, updateData, userId) {
     try {
       console.log('🔄 [OPTIMIZED] updateTransaction démarré:', {
@@ -1865,73 +1877,28 @@ async getAdminDashboard(period = 'today') {
   }
 
   // =====================================
-  // MÉTHODES UTILITAIRES POUR TESTS ET RESET MANUEL
+  // MÉTHODES UTILITAIRES POUR TESTS ET RESET
   // =====================================
-
   async setResetTimeForTesting(hour, minute) {
-    this.setResetConfig(hour, minute, 2);
+    this.setResetConfig(hour, minute, 0);
     console.log(`🧪 [TEST] Reset configuré pour ${hour}:${minute.toString().padStart(2, '0')}`);
   }
 
   async testResetLogic() {
-    const { isInWindow, currentTime, resetWindow } = this.isInResetWindow();
+    const { isInWindow, currentTime, resetTime } = this.isInResetWindow();
     const { startOfYesterday, endOfYesterday } = this.getYesterdayRange();
     
     return {
       currentTime,
-      resetWindow,
+      resetTime,
       isInWindow,
       yesterdayRange: {
         start: startOfYesterday.toISOString(),
         end: endOfYesterday.toISOString()
       },
-      resetConfig: this.getResetConfig()
+      resetConfig: this.getResetConfig(),
+      cronStatus: 'Vercel CRON automatique à 00h00 UTC'
     };
-  }
-
-  async forceReset(adminId = 'manual') {
-    try {
-      console.log('🔧 [RESET MANUEL] Lancement du reset forcé...');
-      
-      const now = new Date();
-      
-      const archivedCount = await this.archivePartnerTransactionsDynamic();
-      
-      await this.transferBalancesToInitial();
-      
-      const cleanedCount = await this.cleanupDashboardAfterReset();
-      
-      const resetKey = `${now.toDateString()}-MANUAL-${now.getHours()}h${now.getMinutes()}`;
-      await this.saveResetDate(resetKey);
-      
-      const adminUser = await prisma.user.findFirst({
-        where: { role: 'ADMIN' },
-        select: { id: true }
-      });
-      
-      await prisma.transaction.create({
-        data: {
-          montant: 0,
-          type: 'AUDIT_MODIFICATION',
-          description: `Reset manuel effectué par ${adminId}`,
-          envoyeurId: adminUser?.id || adminId === 'manual' ? 'cmffpzf8e0000248t0hu4w1gr' : adminId
-        }
-      });
-      
-      console.log(`✅ [RESET MANUEL] Reset forcé terminé - ${archivedCount} archivées, ${cleanedCount} nettoyées`);
-      
-      return {
-        success: true,
-        archivedCount,
-        cleanedCount,
-        executedAt: now.toISOString(),
-        type: 'manual'
-      };
-      
-    } catch (error) {
-      console.error('❌ [RESET MANUEL] Erreur:', error);
-      throw error;
-    }
   }
 
   async getResetStatus() {
@@ -1955,7 +1922,9 @@ async getAdminDashboard(period = 'today') {
         nextScheduledReset: nextResetTime.toISOString(),
         currentTime: now.toISOString(),
         resetConfig: resetConfig,
-        canExecuteNow: this.isInResetWindow().isInWindow
+        canExecuteNow: this.isInResetWindow().isInWindow,
+        cronStatus: 'CRON automatique Vercel configuré pour 00h00 UTC',
+        cronWorking: resetToday && lastResetDate.includes('vercel-cron')
       };
       
     } catch (error) {
@@ -1966,7 +1935,45 @@ async getAdminDashboard(period = 'today') {
     }
   }
 
-  // Utilitaires pour les labels
+  // NOUVELLE MÉTHODE : Vérifier l'état du CRON Vercel
+  async checkCronStatus() {
+    try {
+      const now = new Date();
+      const today = now.toDateString();
+      const lastResetDate = await this.getLastResetDate();
+      
+      // Vérifier si le reset a eu lieu aujourd'hui
+      const resetExecutedToday = lastResetDate && 
+                                lastResetDate.includes(today) && 
+                                lastResetDate.includes('SUCCESS');
+      
+      // Vérifier si c'est un reset CRON Vercel
+      const isCronReset = lastResetDate && lastResetDate.includes('vercel-cron');
+      
+      return {
+        cronWorking: resetExecutedToday && isCronReset,
+        lastResetDate,
+        resetExecutedToday,
+        isCronReset,
+        currentTime: now.toISOString(),
+        message: resetExecutedToday 
+          ? (isCronReset ? 'CRON Vercel fonctionne correctement' : 'Reset manuel effectué aujourd\'hui')
+          : 'Aucun reset effectué aujourd\'hui - En attente du CRON Vercel',
+        nextCronExecution: '00:00 UTC (chaque nuit)'
+      };
+      
+    } catch (error) {
+      console.error('Erreur checkCronStatus:', error);
+      return {
+        cronWorking: false,
+        error: error.message
+      };
+    }
+  }
+
+  // =====================================
+  // MÉTHODES POUR LABELS ET FORMATAGE
+  // =====================================
   getTransactionTypeLabel(type) {
     const labels = {
       'DEPOT': 'Dépôt',
@@ -2014,7 +2021,12 @@ async getAdminDashboard(period = 'today') {
     return icons[type] || '📦';
   }
 
-  getPeriodLabel(period) {
+  getPeriodLabel(period, customDate = null) {
+    if (period === 'custom' && customDate) {
+      const formatted = this.formatDateForDisplay(customDate);
+      return formatted.long;
+    }
+    
     const labels = {
       'today': "Aujourd'hui",
       'yesterday': "Hier",
@@ -2049,6 +2061,199 @@ async getAdminDashboard(period = 'today') {
     }
 
     return errors;
+  }
+
+  // =====================================
+  // MÉTHODES POUR DATES DISPONIBLES ET TESTS
+  // =====================================
+  async getAvailableDates(userId = null, role = null) {
+    try {
+      const oneYearAgo = new Date();
+      oneYearAgo.setFullYear(oneYearAgo.getFullYear() - 1);
+      
+      // Dates depuis les snapshots
+      const snapshotDates = await prisma.dailySnapshot.findMany({
+        where: {
+          date: { gte: oneYearAgo },
+          ...(userId && { userId })
+        },
+        select: { date: true },
+        distinct: ['date'],
+        orderBy: { date: 'desc' }
+      });
+      
+      // Dates avec transactions importantes
+      let transactionFilter = {
+        createdAt: { gte: oneYearAgo },
+        type: { in: ['DEPOT', 'RETRAIT', 'DEBUT_JOURNEE', 'FIN_JOURNEE'] }
+      };
+      
+      if (userId && role === 'SUPERVISEUR') {
+        transactionFilter.OR = [
+          { destinataireId: userId },
+          { envoyeurId: userId }
+        ];
+      }
+      
+      const transactionDates = await prisma.transaction.findMany({
+        where: transactionFilter,
+        select: { createdAt: true },
+        orderBy: { createdAt: 'desc' }
+      });
+      
+      // Combiner les dates
+      const allDates = new Set();
+      
+      snapshotDates.forEach(snap => {
+        allDates.add(snap.date.toISOString().split('T')[0]);
+      });
+      
+      transactionDates.forEach(tx => {
+        const date = new Date(tx.createdAt);
+        allDates.add(date.toISOString().split('T')[0]);
+      });
+      
+      // Trier et formater
+      const sortedDates = Array.from(allDates).sort((a, b) => new Date(b) - new Date(a));
+      
+      return sortedDates.slice(0, 60).map(dateStr => {
+        const formatted = this.formatDateForDisplay(dateStr);
+        return {
+          value: dateStr,
+          display: formatted.short,
+          displayLong: formatted.long,
+          hasSnapshots: snapshotDates.some(snap => 
+            snap.date.toISOString().split('T')[0] === dateStr
+          )
+        };
+      });
+      
+    } catch (error) {
+      console.error('Erreur getAvailableDates:', error);
+      return [];
+    }
+  }
+
+  async testDateFiltering(testDate) {
+    try {
+      const validation = this.validateCustomDateTime(testDate);
+      if (!validation.valid) {
+        return { error: validation.error };
+      }
+      
+      const dateFilter = this.getDateFilter('custom', testDate);
+      const includeArchived = await this.shouldIncludeArchivedTransactions('custom', testDate);
+      
+      const testTransactions = await prisma.transaction.findMany({
+        where: {
+          createdAt: dateFilter,
+          ...(includeArchived ? { archived: true } : {
+            OR: [
+              { archived: { equals: false } },
+              { archived: { equals: null } }
+            ]
+          })
+        },
+        select: {
+          id: true,
+          type: true,
+          createdAt: true,
+          archived: true,
+          destinataire: { select: { nomComplet: true } }
+        },
+        take: 10,
+        orderBy: { createdAt: 'desc' }
+      });
+      
+      return {
+        testDate,
+        dateFilter: {
+          start: dateFilter.gte.toISOString(),
+          end: dateFilter.lte.toISOString()
+        },
+        includeArchived,
+        transactionsFound: testTransactions.length,
+        sampleTransactions: testTransactions,
+        resetConfig: this.getResetConfig(),
+        cronStatus: 'Vercel CRON automatique'
+      };
+      
+    } catch (error) {
+      console.error('Erreur testDateFiltering:', error);
+      return { error: error.message };
+    }
+  }
+
+  // =====================================
+  // MÉTHODES DE DEBUG ET DIAGNOSTIC
+  // =====================================
+  async debugResetState() {
+    try {
+      const now = new Date();
+      const resetConfig = this.getResetConfig();
+      const todayResetTime = new Date(now);
+      todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+      
+      const [resetStatus, cronStatus, recentTransactions, accountStates] = await Promise.all([
+        this.getResetStatus(),
+        this.checkCronStatus(),
+        prisma.transaction.findMany({
+          where: {
+            type: { in: ['DEPOT', 'RETRAIT'] },
+            partenaireId: { not: null }
+          },
+          select: {
+            id: true,
+            type: true,
+            createdAt: true,
+            archived: true,
+            archivedAt: true,
+            partenaire: { select: { nomComplet: true } }
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 20
+        }),
+        prisma.account.findMany({
+          where: {
+            user: { role: 'SUPERVISEUR', status: 'ACTIVE' }
+          },
+          select: {
+            type: true,
+            balance: true,
+            initialBalance: true,
+            previousInitialBalance: true,
+            user: { select: { nomComplet: true } }
+          }
+        })
+      ]);
+      
+      return {
+        currentTime: now.toISOString(),
+        resetConfig,
+        isAfterTodayReset: now > todayResetTime,
+        resetStatus,
+        cronStatus,
+        recentTransactions: recentTransactions.map(tx => ({
+          type: tx.type,
+          partner: tx.partenaire?.nomComplet,
+          createdAt: tx.createdAt.toISOString(),
+          archived: tx.archived,
+          archivedAt: tx.archivedAt?.toISOString()
+        })),
+        accountStates: accountStates.map(acc => ({
+          user: acc.user.nomComplet,
+          type: acc.type,
+          balance: this.convertFromInt(acc.balance || 0),
+          initialBalance: this.convertFromInt(acc.initialBalance || 0),
+          previousInitialBalance: acc.previousInitialBalance ? this.convertFromInt(acc.previousInitialBalance) : null
+        })),
+        systemMessage: 'Reset géré automatiquement par Vercel CRON à 00h00 UTC'
+      };
+      
+    } catch (error) {
+      console.error('Erreur debugResetState:', error);
+      return { error: error.message };
+    }
   }
 }
 

@@ -96,6 +96,10 @@ router.get('/dashboard',
   TransactionController.getDashboard
 );
 
+// Dans routes/transactionRoutes.js ou adminRoutes.js
+router.get('/dashboard/dates/available', authenticateToken, TransactionController.getAvailableDates);
+router.post('/dashboard/test-date-filter', authenticateToken, TransactionController.testDateFilter);
+
 // 📊 Dashboard admin spécifique (tous les superviseurs)
 router.get('/dashboard/admin', 
   authenticateToken, 

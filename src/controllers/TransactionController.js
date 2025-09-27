@@ -8,40 +8,63 @@ class TransactionController {
   // DASHBOARDS SELON RÔLE - OPTIMISÉS
   // =====================================
 
-  // 📊 DASHBOARD UNIVERSEL (adapté selon le rôle connecté)
   async getDashboard(req, res) {
     try {
       const user = req.user;
-      const { period = 'today' } = req.query;
-
+      // CORRECTION: Utiliser 'date' au lieu de 'datetime' pour correspondre à l'URL
+      const { period = 'today', date } = req.query;
+  
+      // Validation si date personnalisée
+      if (period === 'custom' && date) {
+        const validation = TransactionService.validateCustomDateTime(date);
+        if (!validation.valid) {
+          return res.status(400).json({
+            success: false,
+            message: validation.error
+          });
+        }
+      }
+  
       let dashboardData;
-
-      // ✅ SWITCH OPTIMISÉ - Pas de multiple await
+  
+      // Switch optimisé avec support date
       const dashboardPromise = (() => {
         switch (user.role) {
           case 'ADMIN':
-            return TransactionService.getAdminDashboard(period);
+            return TransactionService.getAdminDashboard(
+              period === 'custom' ? 'custom' : period,
+              period === 'custom' ? date : null
+            );
           case 'SUPERVISEUR':
-            return TransactionService.getSupervisorDashboard(user.id, period);
+            return TransactionService.getSupervisorDashboard(
+              user.id, 
+              period === 'custom' ? 'custom' : period,
+              period === 'custom' ? date : null
+            );
           case 'PARTENAIRE':
-            return TransactionService.getPartnerDashboard(user.id, period);
+            return TransactionService.getPartnerDashboard(
+              user.id, 
+              period === 'custom' ? 'custom' : period,
+              period === 'custom' ? date : null
+            );
           default:
             throw new Error('Rôle utilisateur non reconnu');
         }
       })();
-
+  
       dashboardData = await dashboardPromise;
-
+  
       res.json({
         success: true,
         message: `Dashboard ${user.role.toLowerCase()} récupéré avec succès`,
         data: {
           userRole: user.role,
           period,
+          customDate: period === 'custom' ? date : null,
           dashboard: dashboardData
         }
       });
-
+  
     } catch (error) {
       console.error('❌ [OPTIMIZED] Erreur getDashboard:', error);
       res.status(500).json({
@@ -50,8 +73,7 @@ class TransactionController {
       });
     }
   }
-
-  // 📊 DASHBOARD ADMIN SPÉCIFIQUE (avec tous les superviseurs)
+  
   async getAdminDashboard(req, res) {
     try {
       if (req.user.role !== 'ADMIN') {
@@ -60,16 +82,35 @@ class TransactionController {
           message: 'Accès réservé aux administrateurs'
         });
       }
-
-      const { period = 'today' } = req.query;
-      const dashboardData = await TransactionService.getAdminDashboard(period);
-
+  
+      // CORRECTION: Utiliser 'date' au lieu de 'datetime'
+      const { period = 'today', date } = req.query;
+  
+      // Validation si date personnalisée
+      if (period === 'custom' && date) {
+        const validation = TransactionService.validateCustomDateTime(date);
+        if (!validation.valid) {
+          return res.status(400).json({
+            success: false,
+            message: validation.error
+          });
+        }
+      }
+  
+      const dashboardData = await TransactionService.getAdminDashboard(
+        period === 'custom' ? 'custom' : period,
+        period === 'custom' ? date : null
+      );
+  
       res.json({
         success: true,
         message: 'Dashboard administrateur récupéré',
-        data: dashboardData
+        data: {
+          ...dashboardData,
+          customDate: period === 'custom' ? date : null
+        }
       });
-
+  
     } catch (error) {
       console.error('❌ [OPTIMIZED] Erreur getAdminDashboard:', error);
       res.status(500).json({
@@ -78,37 +119,55 @@ class TransactionController {
       });
     }
   }
+  
+ // 👤 Dashboard superviseur spécifique
+async getSupervisorDashboard(req, res) {
+  try {
+    const supervisorId = req.params.supervisorId || req.user.id;
+    const { period = 'today', date } = req.query; // Support des dates personnalisées
 
-  // 👤 DASHBOARD SUPERVISEUR SPÉCIFIQUE 
-  async getSupervisorDashboard(req, res) {
-    try {
-      const supervisorId = req.params.supervisorId || req.user.id;
-      const { period = 'today' } = req.query;
-
-      // Vérification des permissions
-      if (req.user.role !== 'ADMIN' && req.user.id !== supervisorId) {
-        return res.status(403).json({
-          success: false,
-          message: 'Vous ne pouvez voir que votre propre dashboard'
-        });
-      }
-
-      const dashboardData = await TransactionService.getSupervisorDashboard(supervisorId, period);
-
-      res.json({
-        success: true,
-        message: 'Dashboard superviseur récupéré',
-        data: dashboardData
-      });
-
-    } catch (error) {
-      console.error('❌ [OPTIMIZED] Erreur getSupervisorDashboard:', error);
-      res.status(500).json({
+    // Vérification des permissions
+    if (req.user.role !== 'ADMIN' && req.user.id !== supervisorId) {
+      return res.status(403).json({
         success: false,
-        message: error.message || 'Erreur lors de la récupération du dashboard superviseur'
+        message: 'Vous ne pouvez voir que votre propre dashboard'
       });
     }
+
+    // Validation si date personnalisée
+    if (period === 'custom' && date) {
+      const validation = TransactionService.validateCustomDateTime(date);
+      if (!validation.valid) {
+        return res.status(400).json({
+          success: false,
+          message: validation.error
+        });
+      }
+    }
+
+    const dashboardData = await TransactionService.getSupervisorDashboard(
+      supervisorId, 
+      period === 'custom' ? 'custom' : period,
+      period === 'custom' ? date : null // Paramètre customDate
+    );
+
+    res.json({
+      success: true,
+      message: 'Dashboard superviseur récupéré',
+      data: {
+        ...dashboardData,
+        customDate: period === 'custom' ? date : null
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [OPTIMIZED] Erreur getSupervisorDashboard:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Erreur lors de la récupération du dashboard superviseur'
+    });
   }
+}
 
   // 🤝 DASHBOARD PARTENAIRE SPÉCIFIQUE
   async getPartnerDashboard(req, res) {
@@ -941,7 +1000,10 @@ if (!partenaireId) {
       const dashboardPromise = (() => {
         switch (user.role) {
           case 'ADMIN':
-            return TransactionService.getAdminDashboard(period);
+            return TransactionService.getAdminDashboard(
+              period === 'custom' ? 'custom' : period,
+              period === 'custom' ? date : null
+            );
           case 'SUPERVISEUR':
             return TransactionService.getSupervisorDashboard(user.id, period);
           case 'PARTENAIRE':
@@ -971,6 +1033,67 @@ if (!partenaireId) {
       });
     }
   }
+
+
+  // Nouvelle méthode - Dates disponibles
+async getAvailableDates(req, res) {
+  try {
+    const userId = req.user.role === 'SUPERVISEUR' ? req.user.id : null;
+    const role = req.user.role;
+    
+    const dates = await TransactionService.getAvailableDates(userId, role);
+
+    res.json({
+      success: true,
+      data: {
+        availableDates: dates,
+        totalDates: dates.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Erreur getAvailableDates:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors de la récupération des dates disponibles'
+    });
+  }
+}
+
+// Nouvelle méthode - Test filtrage date (ADMIN seulement)
+async testDateFilter(req, res) {
+  try {
+    if (req.user.role !== 'ADMIN') {
+      return res.status(403).json({
+        success: false,
+        message: 'Accès réservé aux administrateurs'
+      });
+    }
+
+    const { date } = req.body;
+
+    if (!date) {
+      return res.status(400).json({
+        success: false,
+        message: 'Date requise pour le test'
+      });
+    }
+
+    const testResult = await TransactionService.testDateFiltering(date);
+
+    res.json({
+      success: !testResult.error,
+      data: testResult
+    });
+
+  } catch (error) {
+    console.error('Erreur testDateFilter:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Erreur lors du test de filtrage'
+    });
+  }
+}
 }
 
 export default new TransactionController();

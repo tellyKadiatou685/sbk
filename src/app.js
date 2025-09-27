@@ -1,52 +1,56 @@
+// src/app.js - VERSION CORRIGEE POUR CORS
+
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 
-
 // Import des routes
 import userRoutes from './routes/userRoutes.js';
 import TransactionRoute from './routes/transactionRoutes.js';
 import RecentTransactionRoutes from './routes/recentTransactionRoutes.js';
+import AccountLines from './routes/accountLines.js';
 
 const app = express();
 
-// Configuration CORS optimisée
+// Configuration CORS simplifiée et corrigée
 const corsOptions = {
   origin: function (origin, callback) {
     console.log('🔍 Vérification CORS pour origine:', origin);
+    console.log('🔍 NODE_ENV:', process.env.NODE_ENV);
     
-    // Environnement de développement
     const devOrigins = [
       'http://localhost:5173',
       'http://localhost:3000',
       'http://localhost:8080',
-      'http://localhost:8081' // AJOUTÉ pour votre cas
+      'http://localhost:8081',
+      'http://172.20.10.2:8081'
     ];
     
-    // Environnement de production
     const prodOrigins = [
-      'https://sbk-frontend-7wxuidwc2-kadiatou-diallos-projects-f9d54a93.vercel.app'
+      'https://sbk-connect-hub-main-1ksco32j7.vercel.app',
+      'https://sbk-connect-hub-main-j7xp10ki9.vercel.app',
+      'https://sbk-connect-hub-main-j5854bh7.vercel.app',
+      'https://sbk-connect-hub-main-ji58s4bh7.vercel.app',
+      'https://sbk-frontend.pages.dev'
     ];
     
-    // Permettre les requêtes sans origine (ex: Postman, mobile apps)
+    // Autoriser les requêtes sans origine (Postman, curl, etc.)
     if (!origin) {
       console.log('✅ Requête sans origine autorisée');
       return callback(null, true);
     }
     
-    const allowedOrigins = process.env.NODE_ENV === 'production' 
-      ? [...prodOrigins, ...devOrigins] 
-      : devOrigins;
+    // Toujours inclure les origines de dev ET prod en production
+    const allowedOrigins = [...prodOrigins, ...devOrigins];
     
-    // Vérifier d'abord la liste explicite
     if (allowedOrigins.includes(origin)) {
       console.log('✅ Origine dans la liste autorisée:', origin);
       return callback(null, true);
     }
     
-    // Vérifier les domaines Vercel avec regex plus spécifique
-    const isVercelDomain = /^https:\/\/sbk-frontend-[a-z0-9]+-kadiatou-diallos-projects-f9d54a93\.vercel\.app$/.test(origin);
+    // Pattern pour les domaines Vercel dynamiques
+    const isVercelDomain = /^https:\/\/sbk-connect-hub-main-[a-z0-9]+\.vercel\.app$/.test(origin);
     
     if (isVercelDomain) {
       console.log('✅ Domaine Vercel autorisé:', origin);
@@ -54,7 +58,8 @@ const corsOptions = {
     }
     
     console.warn('❌ Origine bloquée par CORS:', origin);
-    callback(new Error('Non autorisé par CORS'));
+    // CORRECTION: Utiliser callback(null, false) au lieu d'une erreur
+    return callback(null, false);
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
@@ -67,62 +72,48 @@ const corsOptions = {
   ],
   exposedHeaders: ['Set-Cookie'],
   maxAge: 86400,
-  optionsSuccessStatus: 200 // Pour les anciens navigateurs
+  optionsSuccessStatus: 200
 };
 
-// IMPORTANT: CORS doit être en PREMIER, avant Helmet
+// Appliquer CORS avant tout
 app.use(cors(corsOptions));
 
-// Gestion explicite des requêtes OPTIONS AVANT les autres middlewares
-app.options('*', cors(corsOptions)); // Utiliser la config CORS
+// Gérer explicitement les requêtes OPTIONS pour toutes les routes
+app.options('*', cors(corsOptions));
 
-// Sécurité avec Helmet APRÈS CORS
+// Helmet avec configuration adaptée
 app.use(helmet({
   crossOriginEmbedderPolicy: false,
-  crossOriginResourcePolicy: { policy: "cross-origin" } // Important pour les API
+  crossOriginResourcePolicy: { policy: "cross-origin" }
 }));
 
-// Rate limiting APRÈS CORS
+// Rate limiting (exclure les requêtes OPTIONS)
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: process.env.NODE_ENV === 'production' ? 5000 : 10000, // Augmenté pour 10+ users
+  max: process.env.NODE_ENV === 'production' ? 5000 : 10000,
   message: {
     success: false,
     message: 'Limite atteinte. Veuillez patienter quelques minutes.'
   },
   standardHeaders: true,
   legacyHeaders: false,
-  skip: (req) => {
-    return req.path === '/api/health' || req.method === 'OPTIONS';
-  }
+  skip: (req) => req.path === '/api/health' || req.method === 'OPTIONS'
 });
 
 app.use('/api/', limiter);
 
-// Parsing middleware
-app.use(express.json({ 
-  limit: '10mb',
-  strict: true
-}));
-app.use(express.urlencoded({ 
-  extended: true, 
-  limit: '10mb'
-}));
+// Middleware de parsing
+app.use(express.json({ limit: '10mb', strict: true }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Middleware de logging avec plus d'infos
+// Middleware de logging
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
   console.log(`[${timestamp}] ${req.method} ${req.path} - Origin: ${req.headers.origin} - IP: ${req.ip}`);
   next();
 });
-// Ajouter après vos middlewares existants
-app.use((req, res, next) => {
-  if (req.path.startsWith('/api/')) {
-    console.log(`📊 ${new Date().toISOString()} - ${req.ip} - ${req.method} ${req.path}`);
-  }
-  next();
-});
-// Route de santé de base
+
+// Route principale
 app.get('/', (req, res) => {
   res.json({ 
     message: 'SBK API Server',
@@ -133,26 +124,31 @@ app.get('/', (req, res) => {
   });
 });
 
-// Route de vérification de santé complète
+// Route de debug pour vérifier la configuration
+app.get('/api/debug-env', (req, res) => {
+  res.json({
+    NODE_ENV: process.env.NODE_ENV,
+    origin: req.headers.origin,
+    userAgent: req.headers['user-agent'],
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Route de santé
 app.get('/api/health', async (req, res) => {
   try {
-    const { testConnection } = await import('./config/database.js');
-    const dbStatus = await testConnection();
-    
     res.json({
-      status: 'healthy',
-      database: dbStatus ? 'connected' : 'disconnected',
-      environment: process.env.NODE_ENV || 'development',
-      cors: 'configured',
+      status: 'OK',
+      timestamp: new Date().toISOString(),
       uptime: process.uptime(),
       memory: process.memoryUsage(),
-      timestamp: new Date().toISOString()
+      version: '1.0.0',
+      environment: process.env.NODE_ENV || 'development'
     });
   } catch (error) {
-    console.error('Health check error:', error);
     res.status(500).json({
-      status: 'error',
-      message: error.message,
+      status: 'ERROR',
+      error: error.message,
       timestamp: new Date().toISOString()
     });
   }
@@ -164,7 +160,12 @@ app.get('/api/test-cors', (req, res) => {
     message: 'CORS fonctionne !',
     origin: req.headers.origin,
     method: req.method,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    headers: {
+      'Access-Control-Allow-Origin': res.get('Access-Control-Allow-Origin'),
+      'Access-Control-Allow-Methods': res.get('Access-Control-Allow-Methods'),
+      'Access-Control-Allow-Headers': res.get('Access-Control-Allow-Headers')
+    }
   });
 });
 
@@ -172,8 +173,9 @@ app.get('/api/test-cors', (req, res) => {
 app.use('/api/users', userRoutes);
 app.use('/api/transactions', TransactionRoute);
 app.use('/api/recent', RecentTransactionRoutes);
+app.use('/api/account-lines', AccountLines);
 
-// Route de test pour vérifier l'authentification
+// Route de test auth
 app.get('/api/test-auth', (req, res) => {
   res.json({
     message: 'Route de test accessible',
@@ -182,65 +184,49 @@ app.get('/api/test-auth', (req, res) => {
   });
 });
 
-// Route 404 avec plus d'informations
+// Route 404
 app.use('*', (req, res) => {
-  console.log(`❌ Route non trouvée: ${req.method} ${req.originalUrl}`);
+  console.log(`❌ Route non trouvée: ${req.method} ${req.path}`);
   res.status(404).json({
     success: false,
     message: 'Route non trouvée',
-    path: req.originalUrl,
+    path: req.path,
     method: req.method,
-    availableRoutes: [
-      'GET /api/health',
-      'GET /api/test-cors',
-      'POST /api/users/login',
-      'POST /api/users/register-request',
-      'GET /api/users/profile',
-      'GET /api/transactions',
-      'GET /api/recent'
-    ],
     timestamp: new Date().toISOString()
   });
 });
 
-
-// Gestion d'erreurs globale améliorée
+// Gestion d'erreurs globale
 app.use((err, req, res, next) => {
-  console.error('❌ Erreur serveur globale:', err);
+  console.error('❌ Erreur serveur:', err);
   
   // Erreur CORS
-  if (err.message.includes('CORS') || err.message.includes('Non autorisé par CORS')) {
+  if (err.message && err.message.includes('CORS')) {
     return res.status(403).json({
       success: false,
-      message: `Accès refusé: origine ${req.headers.origin} non autorisée`,
-      error: 'CORS_ERROR'
+      message: 'Erreur CORS',
+      error: 'Origine non autorisée',
+      timestamp: new Date().toISOString()
     });
   }
   
-  // Erreur de limite de taille
-  if (err.type === 'entity.too.large') {
-    return res.status(413).json({
-      success: false,
-      message: 'Données trop volumineuses',
-      error: 'PAYLOAD_TOO_LARGE'
-    });
-  }
-  
-  // Erreur JSON malformé
-  if (err.type === 'entity.parse.failed') {
+  // Erreur de parsing JSON
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
     return res.status(400).json({
       success: false,
       message: 'Format JSON invalide',
-      error: 'INVALID_JSON'
+      timestamp: new Date().toISOString()
     });
   }
   
-  res.status(500).json({
+  // Erreur générique
+  res.status(err.status || 500).json({
     success: false,
-    message: 'Erreur serveur interne',
-    error: process.env.NODE_ENV === 'development' ? err.message : 'INTERNAL_ERROR',
+    message: process.env.NODE_ENV === 'production' 
+      ? 'Erreur serveur interne' 
+      : err.message,
     timestamp: new Date().toISOString()
   });
 });
 
-export default app;
+export default app
