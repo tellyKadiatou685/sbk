@@ -20,10 +20,10 @@
       "dest": "server.js"
     }
   ],
-  "crons": [
-    {
-      "path": "/api/cron",
-      "schedule": "20 30 * * *"
-    }
-  ]
+ "crons": [
+  {
+    "path": "/api/cron",
+    "schedule": "32 23 * * *"
+  }
+]
 }
