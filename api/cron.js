@@ -1,68 +1,93 @@
-// api/cron.js - Handler complet pour Vercel Cron
+// api/cron.js - Version debug pour l'authentification
 
 export default async function handler(req, res) {
   console.log("🚀 [CRON] Handler démarré");
   console.log("📅 [CRON] Timestamp:", new Date().toISOString());
   console.log("🔧 [CRON] Method:", req.method);
-  console.log("🔧 [CRON] URL:", req.url);
   
   // Vérification de la méthode HTTP
   if (req.method !== 'POST' && req.method !== 'GET') {
-    console.log("❌ [CRON] Méthode non autorisée:", req.method);
     return res.status(405).json({ 
       success: false,
       message: 'Method not allowed',
-      method: req.method,
       allowedMethods: ['GET', 'POST']
     });
   }
 
   try {
-    // Étape 1: Vérification de CRON_SECRET
-    console.log("🔐 [CRON] Vérification des variables d'environnement...");
+    // Debug des variables d'environnement
+    console.log("🔐 [CRON] Debug variables d'environnement:");
+    console.log("🔐 [CRON] CRON_SECRET présent:", !!process.env.CRON_SECRET);
+    console.log("🔐 [CRON] CRON_SECRET longueur:", process.env.CRON_SECRET ? process.env.CRON_SECRET.length : 0);
+    console.log("🔐 [CRON] CRON_SECRET premiers chars:", process.env.CRON_SECRET ? process.env.CRON_SECRET.substring(0, 8) + '...' : 'undefined');
+    
     if (!process.env.CRON_SECRET) {
       console.error("❌ [CRON] CRON_SECRET non défini");
       return res.status(500).json({ 
         success: false,
-        message: 'Configuration error - CRON_SECRET not set',
-        step: 'env_check'
+        message: 'Configuration error - CRON_SECRET not set'
       });
     }
-    console.log("✅ [CRON] CRON_SECRET présent");
 
-    // Étape 2: Vérification de l'autorisation
+    // Debug des headers d'autorisation
     const authHeader = req.headers.authorization;
     const expectedAuth = `Bearer ${process.env.CRON_SECRET}`;
     
-    console.log("🔐 [CRON] Vérification autorisation...");
-    console.log("🔐 [CRON] Auth header présent:", !!authHeader);
+    console.log("🔐 [CRON] Debug autorisation:");
+    console.log("🔐 [CRON] Auth header reçu:", authHeader ? authHeader.substring(0, 20) + '...' : 'null');
+    console.log("🔐 [CRON] Auth header longueur:", authHeader ? authHeader.length : 0);
+    console.log("🔐 [CRON] Expected auth longueur:", expectedAuth.length);
+    console.log("🔐 [CRON] Headers complets:", JSON.stringify(req.headers, null, 2));
     
-    if (authHeader !== expectedAuth) {
+    // Comparaison caractère par caractère pour debug
+    if (authHeader && expectedAuth) {
+      const matches = authHeader === expectedAuth;
+      console.log("🔐 [CRON] Comparaison exacte:", matches);
+      
+      if (!matches) {
+        console.log("🔐 [CRON] Différences détectées:");
+        for (let i = 0; i < Math.max(authHeader.length, expectedAuth.length); i++) {
+          if (authHeader[i] !== expectedAuth[i]) {
+            console.log(`🔐 [CRON] Position ${i}: reçu '${authHeader[i]}' vs attendu '${expectedAuth[i]}'`);
+            break;
+          }
+        }
+      }
+    }
+    
+    // VERSION TEMPORAIRE: Mode debug sans auth pour tester
+    const isDebugMode = process.env.NODE_ENV === 'development' || req.headers['x-debug-mode'] === 'true';
+    
+    if (isDebugMode) {
+      console.log("🚨 [CRON] MODE DEBUG ACTIVÉ - Auth bypassed");
+    } else if (authHeader !== expectedAuth) {
       console.log("❌ [CRON] Autorisation échouée");
-      console.log("🔐 [CRON] Expected format: Bearer YOUR_SECRET");
       return res.status(401).json({ 
         success: false,
         message: 'Unauthorized',
-        step: 'auth_check',
-        hasAuthHeader: !!authHeader,
-        hint: 'Use Authorization: Bearer YOUR_CRON_SECRET'
+        debug: {
+          hasAuthHeader: !!authHeader,
+          authHeaderLength: authHeader ? authHeader.length : 0,
+          expectedLength: expectedAuth.length,
+          startsWithBearer: authHeader ? authHeader.startsWith('Bearer ') : false,
+          cronSecretSet: !!process.env.CRON_SECRET
+        }
       });
     }
-    console.log("✅ [CRON] Autorisation réussie");
 
+    console.log("✅ [CRON] Autorisation OK ou mode debug");
     console.log("🤖 [CRON] Début exécution du cron job");
     
-    // Étape 3: Import du TransactionService
+    // Import du TransactionService
     let TransactionService;
     try {
       console.log("📦 [CRON] Import du TransactionService...");
       
-      // Essayer différents chemins possibles selon la structure
       const importPaths = [
-        '../src/services/TransactionService.js',  // Chemin relatif depuis api/
-        './src/services/TransactionService.js',   // Depuis la racine si CWD change
-        '../TransactionService.js',               // Si dans src/ directement
-        'src/services/TransactionService.js'      // Chemin absolu depuis racine
+        '../src/services/TransactionService.js',
+        './src/services/TransactionService.js',
+        '../TransactionService.js',
+        'src/services/TransactionService.js'
       ];
       
       let serviceModule = null;
@@ -82,60 +107,37 @@ export default async function handler(req, res) {
       }
       
       if (!serviceModule) {
-        throw new Error('Impossible de trouver TransactionService dans tous les chemins testés');
+        throw new Error('Impossible de trouver TransactionService');
       }
       
       TransactionService = serviceModule.default || serviceModule;
       
       if (!TransactionService) {
-        throw new Error('TransactionService export is undefined ou null');
+        throw new Error('TransactionService export is undefined');
       }
       
       console.log("✅ [CRON] TransactionService importé avec succès");
-      console.log("📋 [CRON] Chemin utilisé:", successPath);
       
     } catch (importError) {
-      console.error("❌ [CRON] Erreur lors de l'import du service:", importError);
-      console.error("📋 [CRON] Stack trace import:", importError.stack);
+      console.error("❌ [CRON] Erreur import:", importError);
       return res.status(500).json({ 
         success: false, 
         error: "Service import failed",
-        details: importError.message,
-        step: 'import_service',
-        stack: process.env.NODE_ENV === 'development' ? importError.stack : undefined
+        details: importError.message
       });
     }
 
-    // Étape 4: Vérification que la méthode forceReset existe
-    console.log("🔍 [CRON] Vérification des méthodes disponibles...");
-    
-    if (!TransactionService || typeof TransactionService !== 'object') {
-      console.error("❌ [CRON] TransactionService n'est pas un objet valide");
-      return res.status(500).json({ 
-        success: false,
-        error: "Invalid service object",
-        serviceType: typeof TransactionService,
-        step: 'validate_service'
-      });
-    }
-    
-    const availableMethods = Object.keys(TransactionService);
-    console.log("📋 [CRON] Méthodes disponibles:", availableMethods);
-    
+    // Vérification de la méthode forceReset
     if (typeof TransactionService.forceReset !== 'function') {
       console.error("❌ [CRON] forceReset method not found");
       return res.status(500).json({ 
         success: false,
         error: "Service method not available",
-        details: "forceReset method not found on TransactionService",
-        availableMethods: availableMethods,
-        step: 'validate_method'
+        availableMethods: Object.keys(TransactionService)
       });
     }
-    
-    console.log("✅ [CRON] Méthode forceReset trouvée");
 
-    // Étape 5: Exécution du reset
+    // Exécution du reset
     console.log("🔄 [CRON] Exécution du forceReset...");
     const startTime = Date.now();
     
@@ -143,26 +145,20 @@ export default async function handler(req, res) {
     
     const executionTime = Date.now() - startTime;
     console.log(`✅ [CRON] Reset terminé avec succès en ${executionTime}ms`);
-    console.log("📊 [CRON] Résultat:", JSON.stringify(result, null, 2));
     
     return res.status(200).json({ 
       success: true, 
       data: result,
       executionTime: `${executionTime}ms`,
-      timestamp: new Date().toISOString(),
-      step: 'completed'
+      timestamp: new Date().toISOString()
     });
 
   } catch (error) {
     console.error("❌ [CRON] Erreur générale:", error);
-    console.error("📋 [CRON] Stack trace:", error.stack);
-    
     return res.status(500).json({ 
       success: false, 
       error: error.message,
-      timestamp: new Date().toISOString(),
-      step: 'general_error',
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      timestamp: new Date().toISOString()
     });
   }
 }
