@@ -8,7 +8,7 @@ class TransactionService {
   // =====================================
   static RESET_CONFIG = {
     hour: 23,        // Heure de reset (00h00 UTC pour Vercel CRON)
-    minute: 42,      // Minute de reset  
+    minute: 50,      // Minute de reset  
     windowMinutes: 0 // Fenêtre de reset en minutes
   };
 
