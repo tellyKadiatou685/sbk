@@ -73,7 +73,9 @@ class EmbeddedTransactionService {
         )
       `;
 
-      console.log(`✅ [${source.toUpperCase()}] ${Number(transferResult)} comptes transférés`);
+      // CORRECTION: Gérer BigInt de PostgreSQL
+      const transferCount = typeof transferResult === 'bigint' ? Number(transferResult) : transferResult;
+      console.log(`✅ [${source.toUpperCase()}] ${transferCount} comptes transférés`);
 
       // ÉTAPE 4: Logs APRÈS transfert pour vérification
       console.log(`🔍 [${source.toUpperCase()}] État des comptes APRÈS transfert:`);
@@ -120,7 +122,7 @@ class EmbeddedTransactionService {
         success: true,
         date: today.toISOString(),
         archivedTransactions: archivedCount.count,
-        resetAccounts: Number(transferResult),
+        resetAccounts: transferCount,
         source: source,
         message: `Reset ${source} exécuté avec succès`,
         details: {
@@ -131,7 +133,7 @@ class EmbeddedTransactionService {
       };
 
       console.log(`✅ [${source.toUpperCase()}] Reset terminé avec succès!`);
-      console.log(`📊 [${source.toUpperCase()}] Résultats: ${archivedCount.count} transactions archivées, ${Number(transferResult)} comptes transférés`);
+      console.log(`📊 [${source.toUpperCase()}] Résultats: ${archivedCount.count} transactions archivées, ${transferCount} comptes transférés`);
       
       return result;
 
