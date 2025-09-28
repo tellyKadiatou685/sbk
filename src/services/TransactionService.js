@@ -824,37 +824,7 @@ class TransactionService {
     try {
       console.log('🔄 [TRANSFER] Début du transfert des soldes...');
       
-      // Logs pour debug
-      const accountsBeforeTransfer = await prisma.account.findMany({
-        where: {
-          userId: {
-            in: await prisma.user.findMany({
-              where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
-              select: { id: true }
-            }).then(users => users.map(u => u.id))
-          }
-        },
-        select: {
-          id: true,
-          type: true,
-          balance: true,
-          initialBalance: true,
-          previousInitialBalance: true,
-          user: { select: { nomComplet: true } }
-        }
-      });
-      
-      console.log(`🔍 [TRANSFER DEBUG] Comptes avant transfert:`, 
-        accountsBeforeTransfer.map(acc => ({
-          user: acc.user.nomComplet,
-          type: acc.type,
-          balance: this.convertFromInt(acc.balance),
-          initialBalance: this.convertFromInt(acc.initialBalance),
-          previousInitialBalance: acc.previousInitialBalance ? this.convertFromInt(acc.previousInitialBalance) : null
-        }))
-      );
-      
-      // CORRECTION : Transfert de TOUS les soldes, pas seulement ceux > 0
+      // CORRECTION : Forcer le reset à 0 explicitement
       const result = await prisma.$executeRaw`
         UPDATE accounts 
         SET "previousInitialBalance" = "initialBalance",
@@ -866,40 +836,20 @@ class TransactionService {
         )
       `;
       
-      // Logs après transfert
-      const accountsAfterTransfer = await prisma.account.findMany({
-        where: {
-          userId: {
-            in: await prisma.user.findMany({
-              where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
-              select: { id: true }
-            }).then(users => users.map(u => u.id))
-          }
-        },
-        select: {
-          id: true,
-          type: true,
-          balance: true,
-          initialBalance: true,
-          previousInitialBalance: true,
-          user: { select: { nomComplet: true } }
-        }
-      });
+      // AJOUT : Vérification supplémentaire
+      const verifyResult = await prisma.$executeRaw`
+        UPDATE accounts 
+        SET balance = 0 
+        WHERE "userId" IN (
+          SELECT id FROM users 
+          WHERE role = 'SUPERVISEUR' AND status = 'ACTIVE'
+        ) AND balance != 0
+      `;
       
-      console.log(`✅ [TRANSFER DEBUG] Comptes après transfert:`, 
-        accountsAfterTransfer.map(acc => ({
-          user: acc.user.nomComplet,
-          type: acc.type,
-          balance: this.convertFromInt(acc.balance),
-          initialBalance: this.convertFromInt(acc.initialBalance),
-          previousInitialBalance: acc.previousInitialBalance ? this.convertFromInt(acc.previousInitialBalance) : null
-        }))
-      );
+      console.log(`✅ [TRANSFER] ${result} comptes transférés, ${verifyResult} vérifiés`);
       
-      console.log(`✅ [TRANSFER] Transfert terminé pour tous les comptes actifs`);
-  
     } catch (error) {
-      console.error('❌ [TRANSFER] Erreur transferBalancesToInitial:', error);
+      console.error('❌ [TRANSFER] Erreur:', error);
       throw error;
     }
   }
