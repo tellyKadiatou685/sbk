@@ -3,11 +3,11 @@
 import { PrismaClient } from '@prisma/client';
 
 // =====================================
-// CONFIGURATION CENTRALISÉE IDENTIQUE AU SERVICE
+// CONFIGURATION CENTRALISÉE 
 // =====================================
 const RESET_CONFIG = {
-  hour: 11,        // Même configuration que TransactionService
-  minute: 28,      // Même configuration que TransactionService
+  hour: 11,        // 11h30 pour le reset (test)
+  minute: 30,      // 11h30 pour le reset (test)
   windowMinutes: 0 // Fenêtre de reset en minutes
 };
 
@@ -23,46 +23,49 @@ function convertToInt(value) {
 }
 
 // =====================================
-// LOGIQUE DE DATES IDENTIQUE AU SERVICE
+// LOGIQUE DE DATES CORRIGÉE
 // =====================================
-function getYesterdayRange() {
+function getArchiveRange() {
   const now = new Date();
   
-  // Calculer le reset d'hier - IDENTIQUE au service
+  // Pour archivage : transactions de AVANT-HIER (pas d'hier !)
+  // Calculer le reset d'avant-hier
+  const dayBeforeYesterdayResetTime = new Date(now);
+  dayBeforeYesterdayResetTime.setDate(now.getDate() - 2); // AVANT-HIER
+  dayBeforeYesterdayResetTime.setHours(RESET_CONFIG.hour, RESET_CONFIG.minute, 0, 0);
+  
+  // Calculer le reset d'hier  
   const yesterdayResetTime = new Date(now);
   yesterdayResetTime.setDate(now.getDate() - 1);
   yesterdayResetTime.setHours(RESET_CONFIG.hour, RESET_CONFIG.minute, 0, 0);
   
-  // Calculer le reset d'aujourd'hui - IDENTIQUE au service
-  const todayResetTime = new Date(now);
-  todayResetTime.setHours(RESET_CONFIG.hour, RESET_CONFIG.minute, 0, 0);
+  // Archiver = transactions d'AVANT-HIER (du reset d'avant-hier jusqu'au reset d'hier)
+  const startOfArchive = dayBeforeYesterdayResetTime;
+  const endOfArchive = new Date(yesterdayResetTime.getTime() - 1000); // 1 seconde avant reset d'hier
   
-  // Hier = du reset d'hier jusqu'à juste avant le reset d'aujourd'hui
-  const startOfYesterday = yesterdayResetTime;
-  const endOfYesterday = new Date(todayResetTime.getTime() - 1000); // 1 seconde avant
+  console.log(`📅 [CRON ARCHIVE RANGE] AVANT-HIER: ${startOfArchive.toISOString()} -> ${endOfArchive.toISOString()}`);
+  console.log(`📝 [CRON ARCHIVE] Les transactions d'HIER restent visibles et ne sont PAS archivées`);
   
-  console.log(`📅 [CRON YESTERDAY RANGE] ${startOfYesterday.toISOString()} -> ${endOfYesterday.toISOString()}`);
-  
-  return { startOfYesterday, endOfYesterday };
+  return { startOfArchive, endOfArchive };
 }
 
 // =====================================
-// FONCTION D'ARCHIVAGE IDENTIQUE AU SERVICE
+// FONCTION D'ARCHIVAGE CORRIGÉE - Archive seulement AVANT-HIER
 // =====================================
 async function archivePartnerTransactionsDynamic(prisma) {
   try {
-    const { startOfYesterday, endOfYesterday } = getYesterdayRange();
+    const { startOfArchive, endOfArchive } = getArchiveRange();
     
-    console.log(`📦 [CRON ARCHIVE] Archivage des transactions partenaires pour la période:`, {
-      start: startOfYesterday.toISOString(),
-      end: endOfYesterday.toISOString()
+    console.log(`📦 [CRON ARCHIVE] Archivage des transactions partenaires d'AVANT-HIER seulement:`, {
+      start: startOfArchive.toISOString(),
+      end: endOfArchive.toISOString()
     });
     
     const result = await prisma.transaction.updateMany({
       where: {
         createdAt: {
-          gte: startOfYesterday,
-          lte: endOfYesterday
+          gte: startOfArchive,
+          lte: endOfArchive
         },
         partenaireId: { not: null },
         type: { in: ['DEPOT', 'RETRAIT'] },
@@ -77,7 +80,8 @@ async function archivePartnerTransactionsDynamic(prisma) {
       }
     });
     
-    console.log(`✅ [CRON ARCHIVE] ${result.count} transactions archivées`);
+    console.log(`✅ [CRON ARCHIVE] ${result.count} transactions d'AVANT-HIER archivées`);
+    console.log(`📝 [CRON ARCHIVE] Les transactions d'HIER restent visibles et accessibles`);
     return result.count;
     
   } catch (error) {
