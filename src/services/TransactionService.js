@@ -7,8 +7,8 @@ class TransactionService {
   // CONFIGURATION CENTRALISÉE DU RESET
   // =====================================
   static RESET_CONFIG = {
-    hour: 10,        // Heure de reset (00h00 UTC pour Vercel CRON)
-    minute: 40,      // Minute de reset  
+    hour: 11,        // Heure de reset (00h00 UTC pour Vercel CRON)
+    minute: 28,      // Minute de reset  
     windowMinutes: 0 // Fenêtre de reset en minutes
   };
 
