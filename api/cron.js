@@ -1,8 +1,7 @@
-// api/cron.js - Version finale avec reset corrigé
+// api/cron.js - Version corrigée pour l'erreur BigInt
 
 import { PrismaClient } from '@prisma/client';
 
-// Service intégré pour éviter les problèmes d'import
 class EmbeddedTransactionService {
   constructor() {
     this.prisma = new PrismaClient();
@@ -24,7 +23,7 @@ class EmbeddedTransactionService {
 
       // ÉTAPE 1: Archiver les transactions partenaires d'hier
       console.log(`📦 [${source.toUpperCase()}] Archivage des transactions partenaires...`);
-      const archivedCount = await this.prisma.transaction.updateMany({
+      const archivedResult = await this.prisma.transaction.updateMany({
         where: {
           partenaireId: { not: null },
           createdAt: { lte: yesterday },
@@ -39,7 +38,8 @@ class EmbeddedTransactionService {
         }
       });
 
-      console.log(`✅ [${source.toUpperCase()}] ${archivedCount.count} transactions partenaires archivées`);
+      const archivedCount = archivedResult.count;
+      console.log(`✅ [${source.toUpperCase()}] ${archivedCount} transactions partenaires archivées`);
 
       // ÉTAPE 2: Logs AVANT transfert pour debug
       console.log(`🔍 [${source.toUpperCase()}] État des comptes AVANT transfert:`);
@@ -56,10 +56,10 @@ class EmbeddedTransactionService {
       });
 
       accountsBefore.forEach(acc => {
-        console.log(`   ${acc.user.nomComplet} - ${acc.type}: balance=${acc.balance/100}F, initial=${acc.initialBalance/100}F`);
+        console.log(`   ${acc.user.nomComplet} - ${acc.type}: balance=${this.convertFromInt(acc.balance)}F, initial=${this.convertFromInt(acc.initialBalance)}F`);
       });
 
-      // ÉTAPE 3: CORRECTION - Transfert correct des soldes
+      // ÉTAPE 3: CORRECTION - Transfert correct des soldes avec gestion BigInt
       console.log(`💰 [${source.toUpperCase()}] Transfert des soldes: balance → initialBalance, puis balance = 0`);
       
       const transferResult = await this.prisma.$executeRaw`
@@ -73,8 +73,8 @@ class EmbeddedTransactionService {
         )
       `;
 
-      // CORRECTION: Gérer BigInt de PostgreSQL
-      const transferCount = typeof transferResult === 'bigint' ? Number(transferResult) : transferResult;
+      // CORRECTION PRINCIPALE: Conversion sécurisée BigInt → Number
+      const transferCount = Number(transferResult);
       console.log(`✅ [${source.toUpperCase()}] ${transferCount} comptes transférés`);
 
       // ÉTAPE 4: Logs APRÈS transfert pour vérification
@@ -93,7 +93,7 @@ class EmbeddedTransactionService {
       });
 
       accountsAfter.forEach(acc => {
-        console.log(`   ${acc.user.nomComplet} - ${acc.type}: balance=${acc.balance/100}F, initial=${acc.initialBalance/100}F, previous=${(acc.previousInitialBalance || 0)/100}F`);
+        console.log(`   ${acc.user.nomComplet} - ${acc.type}: balance=${this.convertFromInt(acc.balance)}F, initial=${this.convertFromInt(acc.initialBalance)}F, previous=${this.convertFromInt(acc.previousInitialBalance || 0)}F`);
       });
 
       // ÉTAPE 5: Enregistrer la date de transfert
@@ -110,7 +110,7 @@ class EmbeddedTransactionService {
           data: {
             montant: 0,
             type: 'AUDIT_MODIFICATION',
-            description: `Reset automatique ${source} - ${archivedCount.count} archivées, ${Number(transferResult)} comptes transférés`,
+            description: `Reset automatique ${source} - ${archivedCount} archivées, ${transferCount} comptes transférés`,
             envoyeurId: adminUser?.id || 'system'
           }
         });
@@ -121,7 +121,7 @@ class EmbeddedTransactionService {
       const result = {
         success: true,
         date: today.toISOString(),
-        archivedTransactions: archivedCount.count,
+        archivedTransactions: archivedCount,
         resetAccounts: transferCount,
         source: source,
         message: `Reset ${source} exécuté avec succès`,
@@ -133,7 +133,7 @@ class EmbeddedTransactionService {
       };
 
       console.log(`✅ [${source.toUpperCase()}] Reset terminé avec succès!`);
-      console.log(`📊 [${source.toUpperCase()}] Résultats: ${archivedCount.count} transactions archivées, ${transferCount} comptes transférés`);
+      console.log(`📊 [${source.toUpperCase()}] Résultats: ${archivedCount} transactions archivées, ${transferCount} comptes transférés`);
       
       return result;
 
@@ -150,12 +150,14 @@ class EmbeddedTransactionService {
       }
       
       throw error;
+    } finally {
+      // CORRECTION: Fermer la connexion Prisma
+      await this.prisma.$disconnect();
     }
   }
 
   async saveTransferDate(dateString) {
     try {
-      // Essayer la table systemConfig d'abord
       await this.prisma.systemConfig.upsert({
         where: { key: 'last_daily_transfer' },
         update: { value: dateString },
@@ -165,7 +167,6 @@ class EmbeddedTransactionService {
     } catch (error) {
       console.log('Info: Table systemConfig non disponible, utilisation alternative');
       try {
-        // Alternative: créer une transaction d'audit
         const adminUser = await this.prisma.user.findFirst({
           where: { role: 'ADMIN' },
           select: { id: true }
@@ -187,22 +188,17 @@ class EmbeddedTransactionService {
   }
 
   convertFromInt(value) {
-    return Number(value) / 100;
+    return Number(value || 0) / 100;
   }
 
   convertToInt(value) {
-    return Math.round(Number(value) * 100);
+    return Math.round(Number(value || 0) * 100);
   }
 }
 
 export default async function handler(req, res) {
-  console.log("🚀 [CRON] Handler démarré (service intégré corrigé)");
+  console.log("🚀 [CRON] Handler démarré (version BigInt corrigée)");
   console.log("📅 [CRON] Timestamp:", new Date().toISOString());
-  console.log("🔧 [CRON] Method:", req.method);
-  console.log("🔧 [CRON] Headers:", JSON.stringify({
-    'user-agent': req.headers['user-agent'],
-    'authorization': req.headers.authorization ? 'Bearer ***' : 'none'
-  }));
   
   if (req.method !== 'POST' && req.method !== 'GET') {
     return res.status(405).json({ 
@@ -212,49 +208,38 @@ export default async function handler(req, res) {
     });
   }
 
+  let service;
+  
   try {
     // Vérification de l'autorisation
     const authHeader = req.headers.authorization;
     const isVercelCron = req.headers['user-agent']?.includes('vercel') || 
                         req.headers['x-vercel-cron'] === '1';
     
-    console.log("🔐 [CRON] Vérification autorisation...");
-    console.log("🔐 [CRON] Is Vercel Cron:", isVercelCron);
-    console.log("🔐 [CRON] Has auth header:", !!authHeader);
-    
     if (!process.env.CRON_SECRET) {
-      console.error("❌ [CRON] CRON_SECRET non défini");
       return res.status(500).json({ 
         success: false,
         message: 'CRON_SECRET not set'
       });
     }
     
-    // Bypass auth pour Vercel Cron automatique OU vérifier le token
     if (!isVercelCron && authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
-      console.log("❌ [CRON] Autorisation échouée");
       return res.status(401).json({ 
         success: false,
-        message: 'Unauthorized',
-        debug: {
-          isVercelCron,
-          hasAuthHeader: !!authHeader,
-          expectedFormat: 'Bearer YOUR_CRON_SECRET'
-        }
+        message: 'Unauthorized'
       });
     }
 
     console.log("✅ [CRON] Autorisation OK");
-    console.log("🤖 [CRON] Début exécution avec service intégré corrigé");
+    console.log("🤖 [CRON] Début exécution reset");
     
-    // Utiliser le service intégré
-    const service = new EmbeddedTransactionService();
+    service = new EmbeddedTransactionService();
     const startTime = Date.now();
     
     const result = await service.forceReset('vercel-embedded-cron');
     
     const executionTime = Date.now() - startTime;
-    console.log(`✅ [CRON] Reset terminé avec service intégré en ${executionTime}ms`);
+    console.log(`✅ [CRON] Reset terminé en ${executionTime}ms`);
     
     return res.status(200).json({ 
       success: true, 
@@ -264,14 +249,12 @@ export default async function handler(req, res) {
     });
 
   } catch (error) {
-    console.error("❌ [CRON] Erreur:", error);
-    console.error("📋 [CRON] Stack:", error.stack);
+    console.error("❌ [CRON] Erreur:", error.message);
     
     return res.status(500).json({ 
       success: false, 
       error: error.message,
-      timestamp: new Date().toISOString(),
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      timestamp: new Date().toISOString()
     });
   }
 }
