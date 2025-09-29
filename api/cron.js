@@ -7,7 +7,7 @@ import { PrismaClient } from '@prisma/client';
 // =====================================
 const RESET_CONFIG = {
   hour: 16,        // 11h30 pour le reset (test)
-  minute: 52,      // 11h30 pour le reset (test)
+  minute: 59,      // 11h30 pour le reset (test)
   windowMinutes: 0 // Fenêtre de reset en minutes
 };
 
