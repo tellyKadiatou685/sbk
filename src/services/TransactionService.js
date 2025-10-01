@@ -6,11 +6,11 @@ class TransactionService {
   // =====================================
   // CONFIGURATION CENTRALISÉE DU RESET
   // =====================================
-  static RESET_CONFIG = {
-    hour: 0,
-    minute: 0,
-    windowMinutes: 0
-  };
+ static RESET_CONFIG = {
+  hour: 0,
+  minute: 0,
+  windowMinutes: 0
+};
 
   // =====================================
   // SYSTÈME DE NOTIFICATIONS ET AUTO-REFRESH
@@ -1066,15 +1066,14 @@ class TransactionService {
         const todayResetTime = new Date(now);
         todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
         
-     // APRÈS (fenêtre élargie à 24h)
-transactionFilter = {
-  ...transactionFilter,
-  archived: true,
-  archivedAt: {
-    gte: new Date(todayResetTime.getTime() - 24 * 60 * 60 * 1000),  // 24h avant ✅
-    lte: new Date(todayResetTime.getTime() + 24 * 60 * 60 * 1000)   // 24h après ✅
-  }
-};
+        transactionFilter = {
+          ...transactionFilter,
+          archived: true,
+          archivedAt: {
+            gte: new Date(todayResetTime.getTime() - 60 * 1000),
+            lte: new Date(todayResetTime.getTime() + 10 * 60 * 1000)
+          }
+        };
       } else {
         transactionFilter = {
           ...transactionFilter,
