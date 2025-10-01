@@ -1066,14 +1066,15 @@ class TransactionService {
         const todayResetTime = new Date(now);
         todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
         
-        transactionFilter = {
-          ...transactionFilter,
-          archived: true,
-          archivedAt: {
-            gte: new Date(todayResetTime.getTime() - 60 * 1000),
-            lte: new Date(todayResetTime.getTime() + 10 * 60 * 1000)
-          }
-        };
+     // APRÈS (fenêtre élargie à 24h)
+transactionFilter = {
+  ...transactionFilter,
+  archived: true,
+  archivedAt: {
+    gte: new Date(todayResetTime.getTime() - 24 * 60 * 60 * 1000),  // 24h avant ✅
+    lte: new Date(todayResetTime.getTime() + 24 * 60 * 60 * 1000)   // 24h après ✅
+  }
+};
       } else {
         transactionFilter = {
           ...transactionFilter,

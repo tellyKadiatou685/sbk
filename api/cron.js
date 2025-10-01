@@ -27,24 +27,21 @@ function convertToInt(value) {
 // =====================================
 // api/cron.js - CORRECTION DE LA LOGIQUE D'ARCHIVAGE
 
+// APRÈS (CORRECT - archive HIER)
 function getArchiveRange() {
   const now = new Date();
   
-  // CORRECTION : Archiver les transactions d'HIER (pas d'avant-hier)
-  // Calculer le reset d'hier
   const yesterdayResetTime = new Date(now);
-  yesterdayResetTime.setDate(now.getDate() - 1); // HIER
+  yesterdayResetTime.setDate(now.getDate() - 1); // HIER ✅
   yesterdayResetTime.setHours(RESET_CONFIG.hour, RESET_CONFIG.minute, 0, 0);
   
-  // Calculer le reset d'aujourd'hui  
   const todayResetTime = new Date(now);
   todayResetTime.setHours(RESET_CONFIG.hour, RESET_CONFIG.minute, 0, 0);
   
-  // Archiver = transactions d'HIER (du reset d'hier jusqu'au reset d'aujourd'hui)
   const startOfArchive = yesterdayResetTime;
-  const endOfArchive = new Date(todayResetTime.getTime() - 1000); // 1 seconde avant reset d'aujourd'hui
+  const endOfArchive = new Date(todayResetTime.getTime() - 1000);
   
-  console.log(`📅 [CRON ARCHIVE RANGE] HIER: ${startOfArchive.toISOString()} -> ${endOfArchive.toISOString()}`);
+  console.log(`📅 [CRON ARCHIVE] HIER: ${startOfArchive.toISOString()} -> ${endOfArchive.toISOString()}`);
   
   return { startOfArchive, endOfArchive };
 }

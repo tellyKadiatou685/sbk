@@ -107,6 +107,32 @@ router.get('/dashboard/admin',
   TransactionController.getAdminDashboard
 );
 
+router.post('/fix-archived-transactions', async (req, res) => {
+  try {
+    // Désarchiver toutes les transactions archivées aujourd'hui
+    const result = await prisma.transaction.updateMany({
+      where: {
+        archived: true,
+        archivedAt: {
+          gte: new Date(new Date().setHours(0, 0, 0, 0))
+        }
+      },
+      data: {
+        archived: false,
+        archivedAt: null
+      }
+    });
+
+    res.json({ 
+      success: true, 
+      message: `${result.count} transactions désarchivées`,
+      note: 'Elles seront réarchivées correctement demain à 00h00'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 👤 Dashboard superviseur spécifique
 router.get('/dashboard/supervisor/:supervisorId?', 
   authenticateToken, 
