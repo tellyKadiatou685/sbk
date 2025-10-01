@@ -7,8 +7,8 @@ class TransactionService {
   // CONFIGURATION CENTRALISÉE DU RESET
   // =====================================
   static RESET_CONFIG = {
-    hour: 16,
-    minute: 59,
+    hour: 0,
+    minute: 0,
     windowMinutes: 0
   };
 
@@ -208,24 +208,16 @@ class TransactionService {
     const resetConfig = this.getResetConfig();
     const customDate = new Date(targetDate);
     
-    // Date de la veille
-    const dayBefore = new Date(customDate);
-    dayBefore.setDate(customDate.getDate() - 1);
-    
-    // Début = reset de la veille à l'heure configurée
-    const startOfCustom = new Date(dayBefore);
+    const startOfCustom = new Date(customDate);
     startOfCustom.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
     
-    // Fin = juste avant le reset du jour cible
-    const customResetTime = new Date(customDate);
-    customResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+    const nextDayReset = new Date(startOfCustom);
+    nextDayReset.setDate(startOfCustom.getDate() + 1);
+    const endOfCustom = new Date(nextDayReset.getTime() - 1000);
     
-    const endOfCustom = new Date(customResetTime.getTime() - 1000); // 1 seconde avant
-    
-    console.log(`📅 [CUSTOM DATE RANGE] Reset à ${resetConfig.hour}:${resetConfig.minute.toString().padStart(2, '0')}:`, {
-      targetDate: customDate.toISOString(),
-      startOfCustom: startOfCustom.toISOString(),
-      endOfCustom: endOfCustom.toISOString()
+    console.log(`📅 [CUSTOM DATE RANGE] ${customDate.toISOString().split('T')[0]}:`, {
+      start: startOfCustom.toISOString(),
+      end: endOfCustom.toISOString()
     });
     
     return { startOfCustom, endOfCustom };

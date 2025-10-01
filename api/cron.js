@@ -6,9 +6,9 @@ import { PrismaClient } from '@prisma/client';
 // CONFIGURATION CENTRALISÉE 
 // =====================================
 const RESET_CONFIG = {
-  hour: 16,        // 11h30 pour le reset (test)
-  minute: 59,      // 11h30 pour le reset (test)
-  windowMinutes: 0 // Fenêtre de reset en minutes
+  hour: 0,
+  minute: 9,
+  windowMinutes: 5
 };
 
 // =====================================
