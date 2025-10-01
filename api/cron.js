@@ -7,8 +7,8 @@ import { PrismaClient } from '@prisma/client';
 // =====================================
 const RESET_CONFIG = {
   hour: 0,
-  minute: 9,
-  windowMinutes: 5
+  minute: 0,
+  windowMinutes: 0
 };
 
 // =====================================
@@ -25,26 +25,26 @@ function convertToInt(value) {
 // =====================================
 // LOGIQUE DE DATES CORRIGÉE
 // =====================================
+// api/cron.js - CORRECTION DE LA LOGIQUE D'ARCHIVAGE
+
 function getArchiveRange() {
   const now = new Date();
   
-  // Pour archivage : transactions de AVANT-HIER (pas d'hier !)
-  // Calculer le reset d'avant-hier
-  const dayBeforeYesterdayResetTime = new Date(now);
-  dayBeforeYesterdayResetTime.setDate(now.getDate() - 2); // AVANT-HIER
-  dayBeforeYesterdayResetTime.setHours(RESET_CONFIG.hour, RESET_CONFIG.minute, 0, 0);
-  
-  // Calculer le reset d'hier  
+  // CORRECTION : Archiver les transactions d'HIER (pas d'avant-hier)
+  // Calculer le reset d'hier
   const yesterdayResetTime = new Date(now);
-  yesterdayResetTime.setDate(now.getDate() - 1);
+  yesterdayResetTime.setDate(now.getDate() - 1); // HIER
   yesterdayResetTime.setHours(RESET_CONFIG.hour, RESET_CONFIG.minute, 0, 0);
   
-  // Archiver = transactions d'AVANT-HIER (du reset d'avant-hier jusqu'au reset d'hier)
-  const startOfArchive = dayBeforeYesterdayResetTime;
-  const endOfArchive = new Date(yesterdayResetTime.getTime() - 1000); // 1 seconde avant reset d'hier
+  // Calculer le reset d'aujourd'hui  
+  const todayResetTime = new Date(now);
+  todayResetTime.setHours(RESET_CONFIG.hour, RESET_CONFIG.minute, 0, 0);
   
-  console.log(`📅 [CRON ARCHIVE RANGE] AVANT-HIER: ${startOfArchive.toISOString()} -> ${endOfArchive.toISOString()}`);
-  console.log(`📝 [CRON ARCHIVE] Les transactions d'HIER restent visibles et ne sont PAS archivées`);
+  // Archiver = transactions d'HIER (du reset d'hier jusqu'au reset d'aujourd'hui)
+  const startOfArchive = yesterdayResetTime;
+  const endOfArchive = new Date(todayResetTime.getTime() - 1000); // 1 seconde avant reset d'aujourd'hui
+  
+  console.log(`📅 [CRON ARCHIVE RANGE] HIER: ${startOfArchive.toISOString()} -> ${endOfArchive.toISOString()}`);
   
   return { startOfArchive, endOfArchive };
 }
