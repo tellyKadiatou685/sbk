@@ -109,36 +109,62 @@ router.get('/dashboard/admin',
 
 // Route de diagnostic
 // Route pour archiver les transactions du 30 septembre
-router.post('/archive-yesterday-manually', async (req, res) => {
+router.post('/force-show-in-yesterday', async (req, res) => {
   try {
-    // Transactions du 30 septembre 2025
-    const startOfYesterday = new Date('2025-09-30T00:00:00.000Z');
-    const endOfYesterday = new Date('2025-09-30T23:59:59.999Z');
-    
-    const result = await prisma.transaction.updateMany({
+    // 1. Vérifier les transactions archivées actuelles
+    const archived = await prisma.transaction.findMany({
       where: {
-        createdAt: {
-          gte: startOfYesterday,
-          lte: endOfYesterday
-        },
-        partenaireId: { not: null },
-        type: { in: ['DEPOT', 'RETRAIT'] },
-        OR: [
-          { archived: false },
-          { archived: null }
-        ]
-      },
-      data: {
         archived: true,
-        archivedAt: new Date('2025-10-01T00:00:00.000Z') // Aujourd'hui à 00h00
-      }
+        partenaireId: { not: null }
+      },
+      select: { id: true, createdAt: true, archivedAt: true }
     });
+
+    if (archived.length === 0) {
+      return res.status(404).json({ error: 'Aucune transaction archivée trouvée' });
+    }
+
+    // 2. Calculer la bonne plage "hier" selon le reset à 00:00
+    const now = new Date();
+    const yesterdayStart = new Date(now);
+    yesterdayStart.setDate(now.getDate() - 1);
+    yesterdayStart.setHours(0, 0, 0, 0);
+    
+    const yesterdayEnd = new Date(now);
+    yesterdayEnd.setHours(0, 0, 0, -1); // 23:59:59.999 d'hier
+
+    // 3. Mettre toutes les transactions archivées dans la plage d'hier
+    const updates = [];
+    for (const tx of archived) {
+      // Mettre la transaction à midi hier pour être sûr qu'elle est dans la plage
+      const newDate = new Date(yesterdayStart);
+      newDate.setHours(12, 0, 0, 0);
+
+      await prisma.transaction.update({
+        where: { id: tx.id },
+        data: {
+          createdAt: newDate,
+          archived: true,
+          archivedAt: now // Archivé maintenant
+        }
+      });
+
+      updates.push({
+        id: tx.id,
+        oldDate: tx.createdAt,
+        newDate: newDate
+      });
+    }
 
     res.json({
       success: true,
-      message: `${result.count} transactions du 30 septembre archivées`,
-      archivedDate: '2025-10-01T00:00:00.000Z',
-      note: 'Consultez maintenant "Hier" pour voir les données du 30 septembre'
+      message: `${updates.length} transactions placées dans "Hier"`,
+      yesterdayRange: {
+        start: yesterdayStart.toISOString(),
+        end: yesterdayEnd.toISOString()
+      },
+      updates,
+      instruction: "Rafraîchissez le dashboard et cliquez sur 'Hier'"
     });
 
   } catch (error) {
