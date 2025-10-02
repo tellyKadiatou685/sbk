@@ -263,8 +263,7 @@ class TransactionService {
       }
       
       if (period === 'yesterday') {
-        // Inclure les archivées seulement si le reset a VRAIMENT eu lieu aujourd'hui via CRON
-        return resetReallyExecutedToday;
+        return true;
       }
       
       return false;
