@@ -107,27 +107,40 @@ router.get('/dashboard/admin',
   TransactionController.getAdminDashboard
 );
 
-router.post('/fix-archived-transactions', async (req, res) => {
+// Route de diagnostic
+// Route pour archiver les transactions du 30 septembre
+router.post('/archive-yesterday-manually', async (req, res) => {
   try {
-    // Désarchiver toutes les transactions archivées aujourd'hui
+    // Transactions du 30 septembre 2025
+    const startOfYesterday = new Date('2025-09-30T00:00:00.000Z');
+    const endOfYesterday = new Date('2025-09-30T23:59:59.999Z');
+    
     const result = await prisma.transaction.updateMany({
       where: {
-        archived: true,
-        archivedAt: {
-          gte: new Date(new Date().setHours(0, 0, 0, 0))
-        }
+        createdAt: {
+          gte: startOfYesterday,
+          lte: endOfYesterday
+        },
+        partenaireId: { not: null },
+        type: { in: ['DEPOT', 'RETRAIT'] },
+        OR: [
+          { archived: false },
+          { archived: null }
+        ]
       },
       data: {
-        archived: false,
-        archivedAt: null
+        archived: true,
+        archivedAt: new Date('2025-10-01T00:00:00.000Z') // Aujourd'hui à 00h00
       }
     });
 
-    res.json({ 
-      success: true, 
-      message: `${result.count} transactions désarchivées`,
-      note: 'Elles seront réarchivées correctement demain à 00h00'
+    res.json({
+      success: true,
+      message: `${result.count} transactions du 30 septembre archivées`,
+      archivedDate: '2025-10-01T00:00:00.000Z',
+      note: 'Consultez maintenant "Hier" pour voir les données du 30 septembre'
     });
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
