@@ -176,69 +176,39 @@ router.get('/test-yesterday-full-flow', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-router.post('/restore-yesterday-partners', async (req, res) => {
+router.post('/force-show-yesterday', async (req, res) => {
   try {
-    const now = new Date();
-    const today = now.toDateString();
-    
-    // 1. Calculer la date d'hier à midi
-    const yesterday = new Date(now);
-    yesterday.setDate(now.getDate() - 1);
-    yesterday.setHours(12, 0, 0, 0);
-    
-    // 2. Trouver toutes les transactions partenaires archivées
-    const archivedPartners = await prisma.transaction.findMany({
-      where: {
-        partenaireId: { not: null },
-        archived: true,
-        type: { in: ['DEPOT', 'RETRAIT'] }
-      },
-      select: { 
-        id: true, 
-        createdAt: true,
-        partenaire: { select: { nomComplet: true } }
-      }
+    // 1. Forcer shouldIncludeArchivedTransactions à retourner true
+    await prisma.systemConfig.upsert({
+      where: { key: 'last_reset_date' },
+      update: { value: `${new Date().toDateString()}-SUCCESS-forced` },
+      create: { key: 'last_reset_date', value: `${new Date().toDateString()}-SUCCESS-forced` }
     });
-    
-    if (archivedPartners.length === 0) {
-      return res.status(404).json({ 
-        error: 'Aucune transaction partenaire archivée trouvée' 
-      });
-    }
-    
-    // 3. Mettre toutes ces transactions à hier
+
+    // 2. Mettre les transactions exactement dans la plage d'hier
+    const now = new Date();
+    const yesterdayMidday = new Date(now);
+    yesterdayMidday.setDate(now.getDate() - 1);
+    yesterdayMidday.setHours(12, 0, 0, 0);
+
     await prisma.transaction.updateMany({
       where: {
-        id: { in: archivedPartners.map(t => t.id) }
+        archived: true,
+        partenaireId: { not: null }
       },
       data: {
-        createdAt: yesterday,
+        createdAt: yesterdayMidday,
         archived: true,
         archivedAt: now
       }
     });
-    
-    // 4. Enregistrer le reset d'aujourd'hui
-    await prisma.systemConfig.upsert({
-      where: { key: 'last_reset_date' },
-      update: { value: `${today}-SUCCESS-restored` },
-      create: { key: 'last_reset_date', value: `${today}-SUCCESS-restored` }
-    });
-    
+
     res.json({
       success: true,
-      restored: archivedPartners.length,
-      yesterdayDate: yesterday.toISOString(),
-      transactions: archivedPartners.map(t => ({
-        id: t.id,
-        partner: t.partenaire?.nomComplet,
-        oldDate: t.createdAt,
-        newDate: yesterday
-      })),
-      message: `${archivedPartners.length} transactions partenaires restaurées dans "Hier"`,
-      instruction: "Rafraîchissez et cliquez sur 'Hier'"
+      message: "Transactions forcées dans Hier",
+      instruction: "Rafraîchissez la page et cliquez sur Hier"
     });
-    
+
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
