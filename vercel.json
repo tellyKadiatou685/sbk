@@ -19,11 +19,5 @@
       "src": "/(.*)",
       "dest": "server.js"
     }
-  ],
- "crons": [
-  {
-    "path": "/api/cron",
-    "schedule": "0 0 * * *"
-  }
-]
+  ]
 }
