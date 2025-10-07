@@ -7,8 +7,8 @@ class TransactionService {
   // CONFIGURATION CENTRALISÉE DU RESET
   // =====================================
  static RESET_CONFIG = {
-  hour: 0,
-  minute: 52,
+  hour: 1,
+  minute: 26,
   windowMinutes: 0
 };
 
@@ -223,16 +223,11 @@ class TransactionService {
     return { startOfCustom, endOfCustom };
   }
 
-  // CORRECTION MAJEURE : Reset basé sur exécution réelle via CRON
   async shouldIncludeArchivedTransactions(period, customDate = null) {
     try {
-      // CORRECTION : Vérifier si un reset a VRAIMENT eu lieu aujourd'hui via CRON
       const lastResetDate = await this.getLastResetDate();
       const today = new Date().toDateString();
       
-      // Un reset a vraiment eu lieu si :
-      // 1. Il y a une entrée pour aujourd'hui
-      // 2. Elle contient "SUCCESS" (pas "ERROR")
       const resetReallyExecutedToday = lastResetDate && 
                                        lastResetDate.includes(today) && 
                                        lastResetDate.includes('SUCCESS');
@@ -245,24 +240,25 @@ class TransactionService {
         const todayOnly = new Date();
         todayOnly.setHours(0, 0, 0, 0);
         
-        // CORRECTION : Pour une date personnalisée passée
         if (targetDateOnly < todayOnly) {
-          // Vérifier s'il y a eu un reset depuis cette date
+          // Date passée (2 oct, 3 oct, etc.)
           const daysSinceTarget = Math.floor((todayOnly - targetDateOnly) / (1000 * 60 * 60 * 24));
-          
-          if (daysSinceTarget === 1) {
-            // Date d'hier - utiliser la logique yesterday
-            return resetReallyExecutedToday;
-          } else if (daysSinceTarget > 1) {
-            // Date plus ancienne - probablement archivée
-            return true;
-          }
+          console.log(`📅 [CUSTOM DATE CHECK] Date passée: ${targetDateOnly.toISOString().split('T')[0]}, Jours depuis: ${daysSinceTarget}`);
+          console.log(`✅ [CUSTOM DATE CHECK] Utilisation des snapshots`);
+          return true;
+        } else if (targetDateOnly.getTime() === todayOnly.getTime()) {
+          // Date = aujourd'hui (4 oct)
+          console.log(`📅 [CUSTOM DATE CHECK] Date = aujourd'hui, données actuelles`);
+          return false;
+        } else {
+          // Date future
+          console.log(`⚠️ [CUSTOM DATE CHECK] Date future, pas de données`);
+          return false;
         }
-        
-        return false;
       }
       
       if (period === 'yesterday') {
+        console.log(`✅ [YESTERDAY CHECK] Utilisation des snapshots pour hier`);
         return true;
       }
       
@@ -273,6 +269,232 @@ class TransactionService {
       return false;
     }
   }
+
+  // =====================================
+// SYSTÈME DE SNAPSHOTS QUOTIDIENS
+// =====================================
+// À ajouter dans TransactionService.js, juste avant generateReference()
+
+async createDailySnapshot(userId, date = new Date()) {
+  try {
+    const targetDate = new Date(date);
+    targetDate.setHours(0, 0, 0, 0);
+    
+    console.log(`📸 [SNAPSHOT] Création snapshot pour ${userId} le ${targetDate.toISOString().split('T')[0]}`);
+    
+    const accounts = await prisma.account.findMany({
+      where: { userId },
+      select: {
+        type: true,
+        balance: true,
+        initialBalance: true
+      }
+    });
+    
+    const snapshotData = {
+      date: targetDate,
+      userId,
+      liquideDebut: 0,
+      orangeMoneyDebut: 0,
+      waveDebut: 0,
+      uvMasterDebut: 0,
+      autresDebut: 0,
+      liquideFin: 0,
+      orangeMoneyFin: 0,
+      waveFin: 0,
+      uvMasterFin: 0,
+      autresFin: 0,
+      debutTotal: 0,
+      sortieTotal: 0,
+      grTotal: 0
+    };
+    
+    accounts.forEach(account => {
+      const debut = account.initialBalance;
+      const fin = account.balance;
+      
+      switch (account.type) {
+        case 'LIQUIDE':
+          snapshotData.liquideDebut = debut;
+          snapshotData.liquideFin = fin;
+          break;
+        case 'ORANGE_MONEY':
+          snapshotData.orangeMoneyDebut = debut;
+          snapshotData.orangeMoneyFin = fin;
+          break;
+        case 'WAVE':
+          snapshotData.waveDebut = debut;
+          snapshotData.waveFin = fin;
+          break;
+        case 'UV_MASTER':
+          snapshotData.uvMasterDebut = debut;
+          snapshotData.uvMasterFin = fin;
+          break;
+        case 'AUTRES':
+          snapshotData.autresDebut = debut;
+          snapshotData.autresFin = fin;
+          break;
+      }
+      
+      snapshotData.debutTotal += Number(debut);
+      snapshotData.sortieTotal += Number(fin);
+    });
+    
+    snapshotData.grTotal = snapshotData.sortieTotal - snapshotData.debutTotal;
+    
+    const snapshot = await prisma.dailySnapshot.upsert({
+      where: {
+        userId_date: {
+          userId,
+          date: targetDate
+        }
+      },
+      update: snapshotData,
+      create: snapshotData
+    });
+    
+    console.log(`✅ [SNAPSHOT] Snapshot créé pour ${userId}`);
+    
+    return snapshot;
+    
+  } catch (error) {
+    console.error('❌ [SNAPSHOT] Erreur création snapshot:', error);
+    throw error;
+  }
+}
+
+async createSnapshotsForAllSupervisors(date = new Date()) {
+  try {
+    console.log(`📸 [BATCH SNAPSHOT] Création snapshots pour tous les superviseurs...`);
+    
+    const supervisors = await prisma.user.findMany({
+      where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
+      select: { id: true, nomComplet: true }
+    });
+    
+    const results = await Promise.allSettled(
+      supervisors.map(sup => this.createDailySnapshot(sup.id, date))
+    );
+    
+    const successful = results.filter(r => r.status === 'fulfilled').length;
+    const failed = results.filter(r => r.status === 'rejected').length;
+    
+    console.log(`✅ [BATCH SNAPSHOT] ${successful} snapshots créés, ${failed} échecs`);
+    
+    return { successful, failed, total: supervisors.length };
+    
+  } catch (error) {
+    console.error('❌ [BATCH SNAPSHOT] Erreur:', error);
+    throw error;
+  }
+}
+
+async getSnapshotForDate(userId, targetDate) {
+  try {
+    const date = new Date(targetDate);
+    date.setHours(0, 0, 0, 0);
+    
+    const snapshot = await prisma.dailySnapshot.findUnique({
+      where: {
+        userId_date: {
+          userId,
+          date
+        }
+      }
+    });
+    
+    if (!snapshot) {
+      console.log(`⚠️ [SNAPSHOT] Aucun snapshot trouvé pour ${userId} le ${date.toISOString().split('T')[0]}`);
+      return null;
+    }
+    
+    return {
+      date: snapshot.date,
+      comptes: {
+        debut: {
+          LIQUIDE: this.convertFromInt(snapshot.liquideDebut),
+          ORANGE_MONEY: this.convertFromInt(snapshot.orangeMoneyDebut),
+          WAVE: this.convertFromInt(snapshot.waveDebut),
+          UV_MASTER: this.convertFromInt(snapshot.uvMasterDebut),
+          AUTRES: this.convertFromInt(snapshot.autresDebut)
+        },
+        sortie: {
+          LIQUIDE: this.convertFromInt(snapshot.liquideFin),
+          ORANGE_MONEY: this.convertFromInt(snapshot.orangeMoneyFin),
+          WAVE: this.convertFromInt(snapshot.waveFin),
+          UV_MASTER: this.convertFromInt(snapshot.uvMasterFin),
+          AUTRES: this.convertFromInt(snapshot.autresFin)
+        }
+      },
+      totaux: {
+        debutTotal: this.convertFromInt(snapshot.debutTotal),
+        sortieTotal: this.convertFromInt(snapshot.sortieTotal),
+        grTotal: this.convertFromInt(snapshot.grTotal)
+      }
+    };
+    
+  } catch (error) {
+    console.error('❌ [SNAPSHOT] Erreur récupération snapshot:', error);
+    return null;
+  }
+}
+
+async migrateHistoricalDataToSnapshots(daysBack = 7) {
+  try {
+    console.log(`🔄 [MIGRATION] Migration des ${daysBack} derniers jours vers snapshots...`);
+    
+    const supervisors = await prisma.user.findMany({
+      where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
+      select: { id: true, nomComplet: true }
+    });
+    
+    const results = [];
+    
+    for (let i = 1; i <= daysBack; i++) {
+      const targetDate = new Date();
+      targetDate.setDate(targetDate.getDate() - i);
+      targetDate.setHours(0, 0, 0, 0);
+      
+      console.log(`📅 [MIGRATION] Jour -${i}: ${targetDate.toISOString().split('T')[0]}`);
+      
+      for (const supervisor of supervisors) {
+        try {
+          const existing = await prisma.dailySnapshot.findUnique({
+            where: {
+              userId_date: {
+                userId: supervisor.id,
+                date: targetDate
+              }
+            }
+          });
+          
+          if (existing) {
+            console.log(`⏭️ [MIGRATION] Snapshot existe déjà pour ${supervisor.nomComplet}`);
+            continue;
+          }
+          
+          await this.createDailySnapshot(supervisor.id, targetDate);
+          results.push({ date: targetDate, userId: supervisor.id, success: true });
+          
+        } catch (error) {
+          console.error(`❌ [MIGRATION] Erreur pour ${supervisor.nomComplet}:`, error.message);
+          results.push({ date: targetDate, userId: supervisor.id, success: false, error: error.message });
+        }
+      }
+    }
+    
+    const successful = results.filter(r => r.success).length;
+    const failed = results.filter(r => !r.success).length;
+    
+    console.log(`✅ [MIGRATION] Migration terminée: ${successful} réussies, ${failed} échecs`);
+    
+    return { successful, failed, total: results.length, details: results };
+    
+  } catch (error) {
+    console.error('❌ [MIGRATION] Erreur migration:', error);
+    throw error;
+  }
+}
 
   generateReference(prefix = 'TXN') {
     const timestamp = Date.now().toString(36).toUpperCase();
@@ -302,8 +524,11 @@ class TransactionService {
     const resetConfig = this.getResetConfig();
     
     console.log(`🔍 [DATE FILTER] Période: "${period}", Date custom: ${customDate}`);
+    console.log(`⚙️ [RESET CONFIG] ${resetConfig.hour}h${resetConfig.minute.toString().padStart(2, '0')}`);
     
-    // Support des dates personnalisées
+    // =====================================
+    // DATES PERSONNALISÉES (CUSTOM)
+    // =====================================
     if (period === 'custom' && customDate) {
       const targetDate = new Date(customDate);
       
@@ -311,66 +536,126 @@ class TransactionService {
         throw new Error('Date invalide');
       }
       
-      // CORRECTION : Utiliser la logique basée sur le reset
-      const { startOfCustom, endOfCustom } = this.getCustomDateRange(targetDate);
+      // Une journée = du reset de ce jour jusqu'à 1 seconde avant le reset du lendemain
+      // Exemple : 2 oct = 2 oct 00:00:00 → 2 oct 23:59:59
+      const startOfCustom = new Date(targetDate);
+      startOfCustom.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+      
+      const nextDayReset = new Date(startOfCustom);
+      nextDayReset.setDate(nextDayReset.getDate() + 1);
+      nextDayReset.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+      
+      const endOfCustom = new Date(nextDayReset.getTime() - 1000); // 1 seconde avant le prochain reset
       
       console.log(`📅 [CUSTOM DATE] ${customDate}:`, {
-        gte: startOfCustom.toISOString(),
-        lte: endOfCustom.toISOString(),
-        resetBasedOn: `${resetConfig.hour}h${resetConfig.minute}`
+        start: startOfCustom.toISOString(),
+        end: endOfCustom.toISOString(),
+        startLocal: startOfCustom.toLocaleString('fr-FR', { timeZone: 'Africa/Dakar' }),
+        endLocal: endOfCustom.toLocaleString('fr-FR', { timeZone: 'Africa/Dakar' })
       });
       
       return { gte: startOfCustom, lte: endOfCustom };
     }
     
-    // Logique pour les autres périodes
+    // =====================================
+    // AUTRES PÉRIODES
+    // =====================================
     switch (period.toLowerCase()) {
       case 'today':
+        // Today = du reset d'aujourd'hui jusqu'à maintenant
         const todayResetTime = new Date(now);
         todayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
         
-        // Today commence au reset d'aujourd'hui (ou hier si pas encore passé)
-        const startOfToday = now > todayResetTime ? todayResetTime : (() => {
+        // Si on n'a pas encore atteint le reset d'aujourd'hui
+        // (ex: il est 23h45, reset à minuit pas encore passé)
+        // Alors "today" commence au reset d'hier
+        let startOfToday;
+        if (now < todayResetTime) {
           const yesterdayReset = new Date(todayResetTime);
           yesterdayReset.setDate(yesterdayReset.getDate() - 1);
-          return yesterdayReset;
-        })();
+          startOfToday = yesterdayReset;
+        } else {
+          startOfToday = todayResetTime;
+        }
         
-        console.log(`📅 [TODAY] (basé sur reset CRON):`, {
-          gte: startOfToday.toISOString(),
-          lte: now.toISOString()
+        console.log(`📅 [TODAY]:`, {
+          start: startOfToday.toISOString(),
+          end: now.toISOString(),
+          startLocal: startOfToday.toLocaleString('fr-FR', { timeZone: 'Africa/Dakar' }),
+          endLocal: now.toLocaleString('fr-FR', { timeZone: 'Africa/Dakar' })
         });
+        
         return { gte: startOfToday, lte: now };
-
+  
       case 'yesterday':
-        const { startOfYesterday, endOfYesterday } = this.getYesterdayRange();
+        // Yesterday = du reset d'hier jusqu'à 1 seconde avant le reset d'aujourd'hui
+        const yesterdayResetTime = new Date(now);
+        yesterdayResetTime.setDate(now.getDate() - 1);
+        yesterdayResetTime.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
         
-        console.log(`📅 [YESTERDAY] (basé sur reset CRON ${resetConfig.hour}h${resetConfig.minute}):`, {
-          gte: startOfYesterday.toISOString(),
-          lte: endOfYesterday.toISOString()
+        const todayResetTimeForYesterday = new Date(now);
+        todayResetTimeForYesterday.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+        
+        const startOfYesterday = yesterdayResetTime;
+        const endOfYesterday = new Date(todayResetTimeForYesterday.getTime() - 1000); // 1 seconde avant
+        
+        console.log(`📅 [YESTERDAY]:`, {
+          start: startOfYesterday.toISOString(),
+          end: endOfYesterday.toISOString(),
+          startLocal: startOfYesterday.toLocaleString('fr-FR', { timeZone: 'Africa/Dakar' }),
+          endLocal: endOfYesterday.toLocaleString('fr-FR', { timeZone: 'Africa/Dakar' })
         });
+        
         return { gte: startOfYesterday, lte: endOfYesterday };
-
+  
       case 'week':
         const weekAgo = new Date(now);
         weekAgo.setDate(now.getDate() - 7);
-        weekAgo.setHours(0, 0, 0, 0);
+        weekAgo.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+        
+        console.log(`📅 [WEEK]:`, {
+          start: weekAgo.toISOString(),
+          end: now.toISOString()
+        });
+        
         return { gte: weekAgo, lte: now };
-
+  
       case 'month':
-        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+        const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+        startOfMonth.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+        
+        console.log(`📅 [MONTH]:`, {
+          start: startOfMonth.toISOString(),
+          end: now.toISOString()
+        });
+        
         return { gte: startOfMonth, lte: now };
-
+  
       case 'year':
-        const startOfYear = new Date(now.getFullYear(), 0, 1, 0, 0, 0, 0);
+        const startOfYear = new Date(now.getFullYear(), 0, 1);
+        startOfYear.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+        
+        console.log(`📅 [YEAR]:`, {
+          start: startOfYear.toISOString(),
+          end: now.toISOString()
+        });
+        
         return { gte: startOfYear, lte: now };
-
+  
       case 'all':
+        console.log(`📅 [ALL] Pas de filtre de date`);
         return {};
-
+  
       default:
+        // Par défaut : journée entière basée sur le reset
         const defaultStart = new Date(now);
-        defaultStart.setHours(0, 0, 0, 0);
+        defaultStart.setHours(resetConfig.hour, resetConfig.minute, 0, 0);
+        
+        console.log(`📅 [DEFAULT]:`, {
+          start: defaultStart.toISOString(),
+          end: now.toISOString()
+        });
+        
         return { gte: defaultStart, lte: now };
     }
   }
@@ -442,85 +727,116 @@ class TransactionService {
   // =====================================
   async createAdminTransaction(adminId, transactionData) {
     try {
-      const { superviseurId, typeCompte, typeOperation, montant, partenaireId } = transactionData;
-
+      const { 
+        superviseurId, 
+        typeCompte, 
+        typeOperation, 
+        montant, 
+        partenaireId,
+        partenaireNom  // NOUVEAU : nom libre du partenaire
+      } = transactionData;
+  
       const montantFloat = parseFloat(montant);
       if (isNaN(montantFloat) || montantFloat <= 0) {
         throw new Error('Montant invalide');
       }
-
+  
       const montantInt = this.convertToInt(montantFloat);
-
-      const [supervisor, partner] = await Promise.all([
-        prisma.user.findUnique({
-          where: { id: superviseurId, role: 'SUPERVISEUR' },
-          select: { id: true, nomComplet: true, status: true }
-        }),
-        partenaireId ? prisma.user.findUnique({
-          where: { id: partenaireId, role: 'PARTENAIRE' },
-          select: { id: true, nomComplet: true, status: true }
-        }) : Promise.resolve(null)
-      ]);
-
+  
+      // Vérification du superviseur
+      const supervisor = await prisma.user.findUnique({
+        where: { id: superviseurId, role: 'SUPERVISEUR' },
+        select: { id: true, nomComplet: true, status: true }
+      });
+  
       if (!supervisor) {
         throw new Error('Superviseur non trouvé');
       }
-
-      if (partenaireId && !partner) {
-        throw new Error('Partenaire non trouvé');
+  
+      // NOUVEAU : Logique partenaire améliorée
+      const isPartnerTransaction = !!(partenaireId || partenaireNom);
+      let partner = null;
+      let partnerDisplayName = '';
+  
+      if (isPartnerTransaction) {
+        if (partenaireId) {
+          // Partenaire enregistré
+          partner = await prisma.user.findUnique({
+            where: { id: partenaireId, role: 'PARTENAIRE' },
+            select: { id: true, nomComplet: true, status: true }
+          });
+          
+          if (!partner) {
+            throw new Error('Partenaire enregistré non trouvé');
+          }
+          partnerDisplayName = partner.nomComplet;
+        } else if (partenaireNom) {
+          // Partenaire libre (non enregistré)
+          partnerDisplayName = partenaireNom.trim();
+          
+          if (!partnerDisplayName || partnerDisplayName.length < 2) {
+            throw new Error('Nom du partenaire invalide (minimum 2 caractères)');
+          }
+        }
       }
-
-      const isPartnerTransaction = !!partenaireId;
-      
-      let account = null;
-      let balanceUpdate = {};
-
+  
+      // TRAITEMENT DES TRANSACTIONS PARTENAIRES
       if (isPartnerTransaction) {
         let transactionType, description;
         
         if (typeOperation === 'depot') {
           transactionType = 'DEPOT';
-          description = `Dépôt partenaire ${partner.nomComplet}`;
+          description = `Dépôt partenaire ${partnerDisplayName}`;
         } else {
           transactionType = 'RETRAIT';
-          description = `Retrait partenaire ${partner.nomComplet}`;
+          description = `Retrait partenaire ${partnerDisplayName}`;
         }
-
+  
         const result = await prisma.$transaction(async (tx) => {
+          const transactionData = {
+            montant: montantInt,
+            type: transactionType,
+            description,
+            envoyeurId: adminId,
+            destinataireId: superviseurId
+          };
+  
+          // NOUVEAU : Ajouter partenaireId OU partenaireNom
+          if (partenaireId) {
+            transactionData.partenaireId = partenaireId;
+          } else if (partenaireNom) {
+            transactionData.partenaireNom = partenaireNom.trim();
+          }
+  
           const transaction = await tx.transaction.create({
-            data: {
-              montant: montantInt,
-              type: transactionType,
-              description,
-              envoyeurId: adminId,
-              destinataireId: superviseurId,
-              partenaireId
-            },
+            data: transactionData,
             select: {
               id: true,
               type: true,
               description: true,
-              createdAt: true
+              createdAt: true,
+              partenaireNom: true
             }
           });
-
+  
           return { transaction, updatedAccount: null };
         });
-
+  
+        // Notification asynchrone
         setImmediate(async () => {
           try {
             let notificationTitle, notificationMessage, notificationType;
-
+  
             if (typeOperation === 'depot') {
               notificationTitle = 'Nouveau dépôt partenaire';
-              notificationMessage = `${partner.nomComplet} a déposé ${this.formatAmount(montantFloat)}`;
+              notificationMessage = `${partnerDisplayName} a déposé ${this.formatAmount(montantFloat)}`;
               notificationType = 'DEPOT_PARTENAIRE';
             } else {
               notificationTitle = 'Nouveau retrait partenaire';
-              notificationMessage = `${partner.nomComplet} a retiré ${this.formatAmount(montantFloat)}`;
+              notificationMessage = `${partnerDisplayName} a retiré ${this.formatAmount(montantFloat)}`;
               notificationType = 'RETRAIT_PARTENAIRE';
             }
-
+  
             await NotificationService.createNotification({
               userId: superviseurId,
               title: notificationTitle,
@@ -531,7 +847,7 @@ class TransactionService {
             console.error('Erreur notification (non-bloquante):', notifError);
           }
         });
-
+  
         return {
           transaction: {
             id: result.transaction.id,
@@ -542,15 +858,18 @@ class TransactionService {
             typeCompte: null,
             createdAt: result.transaction.createdAt,
             isPartnerTransaction: true,
-            partnerName: partner.nomComplet,
-            partnerId: partner.id,
+            partnerName: partnerDisplayName,
+            partnerId: partenaireId || null,
+            partenaireNom: result.transaction.partenaireNom || null,
+            isRegisteredPartner: !!partenaireId,
             transactionCategory: 'PARTENAIRE'
           },
           accountUpdated: false
         };
-
+  
       } else {
-        account = await prisma.account.upsert({
+        // LOGIQUE EXISTANTE POUR DÉBUT/FIN JOURNÉE (inchangée)
+        let account = await prisma.account.upsert({
           where: {
             userId_type: {
               userId: superviseurId,
@@ -566,8 +885,8 @@ class TransactionService {
           },
           select: { id: true, balance: true, initialBalance: true }
         });
-
-        let transactionType, description;
+  
+        let transactionType, description, balanceUpdate;
         
         if (typeOperation === 'depot') {
           transactionType = 'DEBUT_JOURNEE';
@@ -578,14 +897,14 @@ class TransactionService {
           description = `Fin journée ${typeCompte}`;
           balanceUpdate = { balance: montantInt };
         }
-
+  
         const result = await prisma.$transaction(async (tx) => {
           const updatedAccount = await tx.account.update({
             where: { id: account.id },
             data: balanceUpdate,
             select: { balance: true, initialBalance: true }
           });
-
+  
           const transaction = await tx.transaction.create({
             data: {
               montant: montantInt,
@@ -602,10 +921,10 @@ class TransactionService {
               createdAt: true
             }
           });
-
+  
           return { transaction, updatedAccount };
         });
-
+  
         setImmediate(async () => {
           try {
             const notificationTitle = typeOperation === 'depot' 
@@ -613,7 +932,7 @@ class TransactionService {
               : 'Solde de fin enregistré';
             const notificationMessage = `${description} - ${this.formatAmount(montantFloat)} par l'admin`;
             const notificationType = typeOperation === 'depot' ? 'DEBUT_JOURNEE' : 'FIN_JOURNEE';
-
+  
             await NotificationService.createNotification({
               userId: superviseurId,
               title: notificationTitle,
@@ -624,7 +943,7 @@ class TransactionService {
             console.error('Erreur notification (non-bloquante):', notifError);
           }
         });
-
+  
         return {
           transaction: {
             id: result.transaction.id,
@@ -637,6 +956,8 @@ class TransactionService {
             isPartnerTransaction: false,
             partnerName: null,
             partnerId: null,
+            partenaireNom: null,
+            isRegisteredPartner: false,
             transactionCategory: 'JOURNEE'
           },
           accountUpdated: true,
@@ -644,7 +965,7 @@ class TransactionService {
           soldeInitial: this.convertFromInt(result.updatedAccount.initialBalance)
         };
       }
-
+  
     } catch (error) {
       console.error('Erreur createAdminTransaction:', error);
       throw error;
@@ -775,6 +1096,18 @@ class TransactionService {
     }
   }
 
+
+
+  getPartnerDisplayName(transaction) {
+    // Priorité : partenaire enregistré > nom libre
+    if (transaction.partenaire?.nomComplet) {
+      return transaction.partenaire.nomComplet;
+    }
+    if (transaction.partenaireNom) {
+      return transaction.partenaireNom;
+    }
+    return 'Partenaire inconnu';
+  }
   async archivePartnerTransactionsDynamic() {
     try {
       const { startOfYesterday, endOfYesterday } = this.getYesterdayRange();
@@ -961,105 +1294,162 @@ class TransactionService {
     }
   }
 
-  // CORRECTION : forceReset optimisé pour CRON Vercel
-  async forceReset(adminId = 'vercel-cron') {
-    try {
-      console.log(`🤖 [CRON RESET ${adminId.toUpperCase()}] Lancement du reset automatique...`);
-      
-      const now = new Date();
-      
-      // ÉTAPE 1 : Archiver les transactions partenaires d'hier
-      console.log('📦 [CRON RESET] Étape 1/4 - Archivage des transactions partenaires...');
-      const archivedCount = await this.archivePartnerTransactionsDynamic();
-      
-      // ÉTAPE 2 : Transférer les soldes (sortie → début)
-      console.log('💰 [CRON RESET] Étape 2/4 - Transfert des soldes...');
-      await this.transferBalancesToInitial();
-      
-      // ÉTAPE 3 : Nettoyage des données temporaires
-      console.log('🧹 [CRON RESET] Étape 3/4 - Nettoyage des données...');
-      const cleanedCount = await this.cleanupDashboardAfterReset();
-      
-      // ÉTAPE 4 : Enregistrer le succès du reset
-      console.log('💾 [CRON RESET] Étape 4/4 - Enregistrement du reset...');
-      const resetKey = `${now.toDateString()}-SUCCESS-${now.getHours()}h${now.getMinutes()}-${adminId}`;
-      await this.saveResetDate(resetKey);
-      
-      // Créer une transaction d'audit
-      const adminUser = await prisma.user.findFirst({
-        where: { role: 'ADMIN' },
-        select: { id: true }
-      });
-      
-      await prisma.transaction.create({
-        data: {
-          montant: 0,
-          type: 'AUDIT_MODIFICATION',
-          description: `Reset automatique ${adminId} - ${archivedCount} archivées, ${cleanedCount} nettoyées`,
-          envoyeurId: adminUser?.id || 'cmffpzf8e0000248t0hu4w1gr'
-        }
-      });
-      
-      console.log(`✅ [CRON RESET ${adminId.toUpperCase()}] Reset terminé avec succès!`);
-      console.log(`📊 [CRON RESET] Résultats: ${archivedCount} transactions archivées, ${cleanedCount} nettoyées`);
-      
-      // ÉTAPE 5 : Envoyer les notifications
-      console.log('📢 [CRON RESET] Envoi des notifications...');
-      const notificationResult = await this.notifyDashboardRefresh({
-        archivedCount,
-        cleanedCount,
-        executedAt: now.toISOString()
-      });
-      
-      console.log(`✅ [CRON RESET] ${notificationResult.successful} notifications envoyées sur ${notificationResult.totalNotifications}`);
-      
-      return {
-        success: true,
-        archivedCount,
-        cleanedCount,
-        executedAt: now.toISOString(),
-        type: adminId,
-        notifications: notificationResult,
-        message: `Reset automatique ${adminId} exécuté avec succès à ${now.toISOString()}`
-      };
-      
-    } catch (error) {
-      console.error(`❌ [CRON RESET ${adminId.toUpperCase()}] Erreur:`, error);
-      
-      // Enregistrer l'erreur
-      try {
-        const now = new Date();
-        const errorKey = `${now.toDateString()}-ERROR-${now.getHours()}h${now.getMinutes()}-${adminId}`;
-        await this.saveResetDate(errorKey);
-      } catch (saveError) {
-        console.error('❌ [CRON RESET] Impossible de sauvegarder l\'erreur:', saveError);
-      }
-      
-      throw error;
-    }
-  }
+ // REMPLACER COMPLÈTEMENT la méthode forceReset() existante par celle-ci
 
+async forceReset(adminId = 'vercel-cron') {
+  try {
+    console.log(`🤖 [CRON RESET ${adminId.toUpperCase()}] Lancement du reset automatique...`);
+    
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(0, 0, 0, 0);
+    
+    // ÉTAPE 0 : Créer les snapshots AVANT le reset
+    console.log('📸 [CRON RESET] Étape 0/5 - Création des snapshots quotidiens...');
+    const snapshotResult = await this.createSnapshotsForAllSupervisors(yesterday);
+    console.log(`✅ [CRON RESET] ${snapshotResult.successful} snapshots créés pour hier`);
+    
+    // ÉTAPE 1 : Archiver les transactions partenaires d'hier
+    console.log('📦 [CRON RESET] Étape 1/5 - Archivage des transactions partenaires...');
+    const archivedCount = await this.archivePartnerTransactionsDynamic();
+    
+    // ÉTAPE 2 : Transférer les soldes (sortie → début)
+    console.log('💰 [CRON RESET] Étape 2/5 - Transfert des soldes...');
+    await this.transferBalancesToInitial();
+    
+    // ÉTAPE 3 : Nettoyage des données temporaires
+    console.log('🧹 [CRON RESET] Étape 3/5 - Nettoyage des données...');
+    const cleanedCount = await this.cleanupDashboardAfterReset();
+    
+    // ÉTAPE 4 : Enregistrer le succès du reset
+    console.log('💾 [CRON RESET] Étape 4/5 - Enregistrement du reset...');
+    const resetKey = `${now.toDateString()}-SUCCESS-${now.getHours()}h${now.getMinutes()}-${adminId}`;
+    await this.saveResetDate(resetKey);
+    
+    const adminUser = await prisma.user.findFirst({
+      where: { role: 'ADMIN' },
+      select: { id: true }
+    });
+    
+    await prisma.transaction.create({
+      data: {
+        montant: 0,
+        type: 'AUDIT_MODIFICATION',
+        description: `Reset automatique ${adminId} - ${snapshotResult.successful} snapshots, ${archivedCount} archivées, ${cleanedCount} nettoyées`,
+        envoyeurId: adminUser?.id || 'cmffpzf8e0000248t0hu4w1gr'
+      }
+    });
+    
+    console.log(`✅ [CRON RESET ${adminId.toUpperCase()}] Reset terminé avec succès!`);
+    console.log(`📊 [CRON RESET] Résultats: ${snapshotResult.successful} snapshots, ${archivedCount} transactions archivées, ${cleanedCount} nettoyées`);
+    
+    // ÉTAPE 5 : Envoyer les notifications
+    console.log('📢 [CRON RESET] Étape 5/5 - Envoi des notifications...');
+    const notificationResult = await this.notifyDashboardRefresh({
+      archivedCount,
+      cleanedCount,
+      snapshotsCreated: snapshotResult.successful,
+      executedAt: now.toISOString()
+    });
+    
+    console.log(`✅ [CRON RESET] ${notificationResult.successful} notifications envoyées sur ${notificationResult.totalNotifications}`);
+    
+    return {
+      success: true,
+      snapshotsCreated: snapshotResult.successful,
+      archivedCount,
+      cleanedCount,
+      executedAt: now.toISOString(),
+      type: adminId,
+      notifications: notificationResult,
+      message: `Reset automatique ${adminId} exécuté avec succès à ${now.toISOString()}`
+    };
+    
+  } catch (error) {
+    console.error(`❌ [CRON RESET ${adminId.toUpperCase()}] Erreur:`, error);
+    
+    try {
+      const now = new Date();
+      const errorKey = `${now.toDateString()}-ERROR-${now.getHours()}h${now.getMinutes()}-${adminId}`;
+      await this.saveResetDate(errorKey);
+    } catch (saveError) {
+      console.error('❌ [CRON RESET] Impossible de sauvegarder l\'erreur:', saveError);
+    }
+    
+    throw error;
+  }
+}
+
+
+  validateAdminTransactionData(data) {
+    const errors = [];
+  
+    if (!data.superviseurId) {
+      errors.push('Superviseur requis');
+    }
+  
+    // NOUVEAU : Validation partenaire améliorée
+    const hasPartenaireId = !!data.partenaireId;
+    const hasPartenaireNom = !!data.partenaireNom;
+    const isPartnerTransaction = hasPartenaireId || hasPartenaireNom;
+  
+    if (hasPartenaireId && hasPartenaireNom) {
+      errors.push('Choisissez soit un partenaire enregistré, soit un nom libre (pas les deux)');
+    }
+  
+    if (!isPartnerTransaction && !data.typeCompte) {
+      errors.push('Type de compte requis pour transactions début/fin journée');
+    }
+  
+    if (!data.typeOperation) {
+      errors.push('Type d\'opération requis');
+    }
+  
+    if (!data.montant || data.montant <= 0) {
+      errors.push('Montant doit être supérieur à 0');
+    }
+  
+    if (hasPartenaireNom) {
+      const nomTrimmed = data.partenaireNom.trim();
+      if (nomTrimmed.length < 2) {
+        errors.push('Nom du partenaire doit contenir au moins 2 caractères');
+      }
+      if (nomTrimmed.length > 100) {
+        errors.push('Nom du partenaire trop long (maximum 100 caractères)');
+      }
+    }
+  
+    return errors;
+  }
   // =====================================
   // MÉTHODES DASHBOARD SANS AUTO-RESET
-  // =====================================
   async getAdminDashboard(period = 'today', customDate = null) {
     try {
-      // CORRECTION : Plus de vérification automatique - le CRON Vercel s'en charge
       console.log(`📊 [ADMIN DASHBOARD] Période: ${period}, Date: ${customDate}`);
       
       const dateFilter = this.getDateFilter(period, customDate);
       const includeArchived = await this.shouldIncludeArchivedTransactions(period, customDate);
       
-      console.log(`📊 [ADMIN DASHBOARD] Filtre date:`, {
-        start: dateFilter.gte?.toISOString(),
-        end: dateFilter.lte?.toISOString(),
-        includeArchived
-      });
-      
-      // Filtre de transactions basé sur reset réel via CRON
-      let transactionFilter = { createdAt: dateFilter };
-
+      // Déterminer la date cible pour les snapshots
+      let snapshotDate = null;
       if (includeArchived) {
+        if (period === 'yesterday') {
+          snapshotDate = new Date();
+          snapshotDate.setDate(snapshotDate.getDate() - 1);
+          snapshotDate.setHours(0, 0, 0, 0);
+        } else if (period === 'custom' && customDate) {
+          snapshotDate = new Date(customDate);
+          snapshotDate.setHours(0, 0, 0, 0);
+        }
+        console.log(`📸 [ADMIN DASHBOARD] Date snapshot cible: ${snapshotDate?.toISOString().split('T')[0]}`);
+      }
+      
+      let transactionFilter = { createdAt: dateFilter };
+  
+      if (snapshotDate) {
+        console.log(`📋 [ADMIN DASHBOARD] Chargement transactions pour date avec snapshot`);
+      } else if (includeArchived && period === 'yesterday') {
         const now = new Date();
         const resetConfig = this.getResetConfig();
         const todayResetTime = new Date(now);
@@ -1082,10 +1472,7 @@ class TransactionService {
           ]
         };
       }
-
-      console.log(`📊 [ADMIN DASHBOARD] Filtre transactions final:`, transactionFilter);
-
-      // Récupération des superviseurs
+  
       const supervisors = await prisma.user.findMany({
         where: { role: 'SUPERVISEUR', status: 'ACTIVE' },
         select: {
@@ -1107,6 +1494,7 @@ class TransactionService {
               type: true,
               montant: true,
               partenaireId: true,
+              partenaireNom: true,
               archived: true,
               archivedAt: true,
               createdAt: true,
@@ -1118,62 +1506,52 @@ class TransactionService {
         },
         orderBy: { nomComplet: 'asc' }
       });
-
-      console.log(`📊 [ADMIN DASHBOARD] ${supervisors.length} superviseurs trouvés`);
-
-      // Cas spécial : date personnalisée sans données
-      if (period === 'custom' && supervisors.every(s => s.transactionsRecues.length === 0)) {
-        console.log(`📊 [CUSTOM DATE] Aucune donnée trouvée pour ${customDate}`);
-        
-        return {
-          period,
-          customDate,
-          globalTotals: {
-            uvMaster: { solde: 0, sorties: 0, formatted: { solde: "0 F", sorties: "0 F" } },
-            debutTotalGlobal: 0, sortieTotalGlobal: 0, grTotalGlobal: 0,
-            formatted: { debutTotalGlobal: "0 F", sortieTotalGlobal: "0 F", grTotalGlobal: "0 F" }
-          },
-          supervisorCards: supervisors.map(supervisor => ({
-            id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status,
-            comptes: { debut: {}, sortie: {} },
-            totaux: {
-              debutTotal: 0, sortieTotal: 0, grTotal: 0,
-              formatted: { debutTotal: "0 F", sortieTotal: "0 F", grTotal: "0 F" }
-            }
-          })),
-          dynamicConfig: {
-            resetConfig: this.getResetConfig(), includeArchived,
-            targetDateTime: customDate, filterApplied: 'archived_excluded', dataSource: 'empty'
-          }
-        };
-      }
-
-      // Traitement des superviseurs
+  
       let totalDebutGlobal = 0, totalSortieGlobal = 0, uvMasterSolde = 0, uvMasterSorties = 0;
-
-      const supervisorCards = supervisors.map(supervisor => {
+  
+      const supervisorCards = await Promise.all(supervisors.map(async (supervisor) => {
         const accountsByType = { debut: {}, sortie: {} };
-
-        // CORRECTION : Logique basée sur reset réel via CRON
-        if (includeArchived && period === 'yesterday') {
-          // Hier après reset CRON : utiliser previousInitialBalance et initialBalance
-          supervisor.accounts.forEach(account => {
-            const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
-            const ancienneSortieHier = this.convertFromInt(account.initialBalance || 0);
+  
+        // CORRECTION : Charger les snapshots pour dates passées
+        if (snapshotDate) {
+          const snapshot = await this.getSnapshotForDate(supervisor.id, snapshotDate);
+          
+          if (snapshot) {
+            console.log(`📸 [DASHBOARD] ✅ Snapshot trouvé pour ${supervisor.nomComplet} le ${snapshotDate.toISOString().split('T')[0]}`);
             
-            accountsByType.debut[account.type] = ancienDebutHier;
-            accountsByType.sortie[account.type] = ancienneSortieHier;
+            Object.assign(accountsByType.debut, snapshot.comptes.debut);
+            Object.assign(accountsByType.sortie, snapshot.comptes.sortie);
             
-            if (account.type === 'UV_MASTER') {
-              uvMasterSorties += ancienneSortieHier;
-              uvMasterSolde += ancienDebutHier;
+            if (snapshot.comptes.sortie.UV_MASTER) {
+              uvMasterSorties += snapshot.comptes.sortie.UV_MASTER;
+              uvMasterSolde += snapshot.comptes.debut.UV_MASTER;
             }
-          });
+          } else {
+            console.log(`⚠️ [DASHBOARD] Pas de snapshot, fallback pour ${supervisor.nomComplet}`);
+            
+            supervisor.accounts.forEach(account => {
+              const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
+              const ancienneSortieHier = this.convertFromInt(account.initialBalance || 0);
+              
+              accountsByType.debut[account.type] = ancienDebutHier;
+              accountsByType.sortie[account.type] = ancienneSortieHier;
+              
+              if (account.type === 'UV_MASTER') {
+                uvMasterSorties += ancienneSortieHier;
+                uvMasterSolde += ancienDebutHier;
+              }
+            });
+          }
         } else {
-          // Logique normale : utiliser initialBalance et balance
+          // CORRECTION : Données actuelles (today OU custom=aujourd'hui)
+          console.log(`📊 [DASHBOARD] Chargement données actuelles pour ${supervisor.nomComplet}`);
+          console.log(`📊 [DASHBOARD] Nombre de comptes: ${supervisor.accounts.length}`);
+          
           supervisor.accounts.forEach(account => {
             const initial = this.convertFromInt(account.initialBalance || 0);
             const current = this.convertFromInt(account.balance || 0);
+            
+            console.log(`   - ${account.type}: début=${initial}, sortie=${current}`);
             
             accountsByType.debut[account.type] = initial;
             accountsByType.sortie[account.type] = current;
@@ -1184,16 +1562,21 @@ class TransactionService {
             }
           });
         }
-
-        // Traitement des transactions partenaires
+  
+        // Traitement partenaires
         const partenaireTransactions = {};
         supervisor.transactionsRecues.forEach(tx => {
-          if (tx.partenaireId && tx.partenaire) {
+          const partnerName = this.getPartnerDisplayName(tx);
+          
+          if (partnerName && partnerName !== 'Partenaire inconnu') {
             const montant = this.convertFromInt(tx.montant);
-            const partnerName = tx.partenaire.nomComplet;
             
             if (!partenaireTransactions[partnerName]) {
-              partenaireTransactions[partnerName] = { depots: 0, retraits: 0 };
+              partenaireTransactions[partnerName] = { 
+                depots: 0, 
+                retraits: 0,
+                isRegistered: !!tx.partenaireId
+              };
             }
             
             if (tx.type === 'DEPOT') {
@@ -1203,8 +1586,7 @@ class TransactionService {
             }
           }
         });
-
-        // Ajouter partenaires aux comptes
+  
         Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
           if (amounts.depots > 0) {
             accountsByType.debut[`part-${partnerName}`] = amounts.depots;
@@ -1213,15 +1595,16 @@ class TransactionService {
             accountsByType.sortie[`part-${partnerName}`] = amounts.retraits;
           }
         });
-
-        // Calculer totaux
+  
         const debutTotal = Object.values(accountsByType.debut).reduce((sum, val) => sum + val, 0);
         const sortieTotal = Object.values(accountsByType.sortie).reduce((sum, val) => sum + val, 0);
         const grTotal = sortieTotal - debutTotal;
-
+  
         totalDebutGlobal += debutTotal;
         totalSortieGlobal += sortieTotal;
-
+  
+        console.log(`📊 [DASHBOARD] ${supervisor.nomComplet}: début=${debutTotal}, sortie=${sortieTotal}`);
+  
         return {
           id: supervisor.id,
           nom: supervisor.nomComplet,
@@ -1236,8 +1619,8 @@ class TransactionService {
             }
           }
         };
-      });
-
+      }));
+  
       const globalTotals = {
         uvMaster: {
           solde: uvMasterSolde, sorties: uvMasterSorties,
@@ -1251,44 +1634,39 @@ class TransactionService {
           grTotalGlobal: this.formatAmount(totalSortieGlobal - totalDebutGlobal, true)
         }
       };
-
-      console.log(`📊 [ADMIN DASHBOARD] Résultats:`, {
-        supervisorCount: supervisorCards.length,
-        transactionSource: includeArchived ? 'archived' : 'current',
-        totalDebut: totalDebutGlobal, totalSortie: totalSortieGlobal
-      });
-
+  
       return {
         period, customDate, globalTotals, supervisorCards,
         dynamicConfig: {
           resetConfig: this.getResetConfig(), includeArchived,
           targetDateTime: customDate,
           filterApplied: includeArchived ? 'archived_included' : 'archived_excluded',
-          dataSource: includeArchived ? 'historical_after_reset' : 'current_live',
+          dataSource: snapshotDate ? 'historical_snapshot' : 'current_live',
+          snapshotDate: snapshotDate?.toISOString().split('T')[0],
           cronStatus: 'Vercel CRON géré automatiquement'
         }
       };
-
+  
     } catch (error) {
       console.error('Erreur getAdminDashboard:', error);
       throw error;
     }
   }
+  
 
   async getSupervisorDashboard(superviseurId, period = 'today', customDate = null) {
     try {
-      // CORRECTION : Plus de vérification automatique - le CRON Vercel s'en charge
       const dateFilter = this.getDateFilter(period, customDate);
       const includeArchived = await this.shouldIncludeArchivedTransactions(period, customDate);
       
       console.log(`📊 [SUPERVISOR DASHBOARD] Superviseur: ${superviseurId}, Include archived: ${includeArchived}`);
       
-      // Filtre transactions identique à getAdminDashboard
+      // Filtre transactions
       let transactionFilter = { 
         createdAt: dateFilter,
         AND: [{ OR: [{ envoyeurId: superviseurId }, { destinataireId: superviseurId }] }]
       };
-
+  
       if (includeArchived) {
         const resetConfig = this.getResetConfig();
         const now = new Date();
@@ -1309,7 +1687,7 @@ class TransactionService {
           OR: [{ archived: { equals: false } }, { archived: { equals: null } }]
         };
       }
-
+  
       const [supervisor, allTransactions, uvMasterAccounts] = await Promise.all([
         prisma.user.findUnique({
           where: { id: superviseurId },
@@ -1326,7 +1704,9 @@ class TransactionService {
           where: transactionFilter,
           select: {
             id: true, type: true, montant: true, description: true, createdAt: true,
-            envoyeurId: true, destinataireId: true, partenaireId: true, archived: true,
+            envoyeurId: true, destinataireId: true, partenaireId: true, 
+            partenaireNom: true, // NOUVEAU
+            archived: true,
             destinataire: { select: { nomComplet: true } },
             envoyeur: { select: { nomComplet: true } },
             partenaire: { select: { nomComplet: true } }
@@ -1338,9 +1718,9 @@ class TransactionService {
           select: { balance: true, initialBalance: true, previousInitialBalance: true }
         })
       ]);
-
+  
       if (!supervisor) throw new Error('Superviseur non trouvé');
-
+  
       // Cas spécial : date personnalisée sans données
       if (period === 'custom' && allTransactions.length === 0) {
         return {
@@ -1359,11 +1739,11 @@ class TransactionService {
           }
         };
       }
-
+  
       const accountsByType = { debut: {}, sortie: {} };
       let totalDebutPersonnel = 0, totalSortiePersonnel = 0;
-
-      // CORRECTION : Logique identique à getAdminDashboard
+  
+      // Logique comptes
       if (includeArchived && period === 'yesterday') {
         supervisor.accounts.forEach(account => {
           const ancienDebutHier = this.convertFromInt(account.previousInitialBalance || 0);
@@ -1379,7 +1759,7 @@ class TransactionService {
         supervisor.accounts.forEach(account => {
           const initial = this.convertFromInt(account.initialBalance || 0);
           const current = this.convertFromInt(account.balance || 0);
-
+  
           accountsByType.debut[account.type] = initial;
           accountsByType.sortie[account.type] = current;
           
@@ -1387,16 +1767,22 @@ class TransactionService {
           totalSortiePersonnel += current;
         });
       }
-
-      // Traitement des transactions partenaires
+  
+      // NOUVEAU : Traitement partenaires enregistrés ET libres
       const partenaireTransactions = {};
       allTransactions.forEach(tx => {
-        if (tx.partenaireId && tx.partenaire) {
+        // Utiliser getPartnerDisplayName pour gérer les deux types
+        const partnerName = this.getPartnerDisplayName(tx);
+        
+        if (partnerName && partnerName !== 'Partenaire inconnu') {
           const montant = this.convertFromInt(tx.montant);
-          const partnerName = tx.partenaire.nomComplet;
           
           if (!partenaireTransactions[partnerName]) {
-            partenaireTransactions[partnerName] = { depots: 0, retraits: 0 };
+            partenaireTransactions[partnerName] = { 
+              depots: 0, 
+              retraits: 0,
+              isRegistered: !!tx.partenaireId
+            };
           }
           
           if (tx.type === 'DEPOT' && tx.destinataireId === superviseurId) {
@@ -1406,7 +1792,7 @@ class TransactionService {
           }
         }
       });
-
+  
       // Ajouter partenaires aux comptes ET totaux
       Object.entries(partenaireTransactions).forEach(([partnerName, amounts]) => {
         if (amounts.depots > 0) {
@@ -1418,7 +1804,7 @@ class TransactionService {
           totalSortiePersonnel += amounts.retraits;
         }
       });
-
+  
       // UV MASTER global
       let uvMasterDebut, uvMasterSortie;
       if (includeArchived && period === 'yesterday') {
@@ -1432,31 +1818,36 @@ class TransactionService {
         uvMasterSortie = uvMasterAccounts.reduce((total, account) => 
           total + this.convertFromInt(account.balance || 0), 0);
       }
-
+  
       const grTotal = totalSortiePersonnel - totalDebutPersonnel;
-
+  
       // Formatage des transactions récentes
       const recentTransactions = allTransactions.map(tx => {
         let personne = '';
-        if (tx.partenaireId && tx.partenaire) {
-          personne = `${tx.partenaire.nomComplet} (Partenaire)`;
+        
+        // NOUVEAU : Gérer les partenaires libres
+        if (tx.partenaireId || tx.partenaireNom) {
+          personne = `${this.getPartnerDisplayName(tx)} (Partenaire)`;
         } else if (tx.envoyeurId === superviseurId) {
           personne = tx.destinataire?.nomComplet || 'Destinataire inconnu';
         } else if (tx.destinataireId === superviseurId) {
           personne = tx.envoyeur?.nomComplet || 'Expéditeur inconnu';
         }
+        
         if (['DEBUT_JOURNEE', 'FIN_JOURNEE'].includes(tx.type)) {
           personne = supervisor.nomComplet;
         }
-
+  
         return {
           id: tx.id, type: tx.type, montant: this.convertFromInt(tx.montant),
           description: tx.description, personne, createdAt: tx.createdAt,
           envoyeurId: tx.envoyeurId, destinataireId: tx.destinataireId,
-          partenaireId: tx.partenaireId, archived: tx.archived
+          partenaireId: tx.partenaireId, 
+          partenaireNom: tx.partenaireNom, // NOUVEAU
+          archived: tx.archived
         };
       });
-
+  
       return {
         superviseur: { id: supervisor.id, nom: supervisor.nomComplet, status: supervisor.status },
         period, customDate,
@@ -1477,13 +1868,13 @@ class TransactionService {
         dynamicConfig: {
           period, customDate, resetConfig: this.getResetConfig(), includeArchived,
           totalTransactionsFound: allTransactions.length,
-          partnerTransactionsFound: allTransactions.filter(tx => tx.partenaireId).length,
+          partnerTransactionsFound: allTransactions.filter(tx => tx.partenaireId || tx.partenaireNom).length,
           filterApplied: includeArchived ? 'archived_included' : 'archived_excluded',
           dataSource: includeArchived ? 'historical_after_reset' : 'current_live',
           cronStatus: 'Vercel CRON géré automatiquement'
         }
       };
-
+  
     } catch (error) {
       console.error('Erreur getSupervisorDashboard:', error);
       throw new Error('Erreur lors de la récupération du dashboard superviseur: ' + error.message);

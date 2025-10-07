@@ -83,8 +83,9 @@ class TransactionController {
         });
       }
   
-      // CORRECTION: Utiliser 'date' au lieu de 'datetime'
       const { period = 'today', date } = req.query;
+  
+      console.log('📊 [CONTROLLER] getAdminDashboard appelé:', { period, date });
   
       // Validation si date personnalisée
       if (period === 'custom' && date) {
@@ -97,22 +98,32 @@ class TransactionController {
         }
       }
   
+      // Appel au service
       const dashboardData = await TransactionService.getAdminDashboard(
         period === 'custom' ? 'custom' : period,
         period === 'custom' ? date : null
       );
   
+      console.log('✅ [CONTROLLER] Dashboard data reçu:', {
+        period: dashboardData.period,
+        customDate: dashboardData.customDate,
+        supervisorCount: dashboardData.supervisorCards?.length
+      });
+  
+      // CORRECTION: Retourner directement les données du service
       res.json({
         success: true,
         message: 'Dashboard administrateur récupéré',
         data: {
-          ...dashboardData,
-          customDate: period === 'custom' ? date : null
+          userRole: 'ADMIN',
+          period: dashboardData.period,
+          customDate: dashboardData.customDate,
+          dashboard: dashboardData
         }
       });
   
     } catch (error) {
-      console.error('❌ [OPTIMIZED] Erreur getAdminDashboard:', error);
+      console.error('❌ [CONTROLLER] Erreur getAdminDashboard:', error);
       res.status(500).json({
         success: false,
         message: error.message || 'Erreur lors de la récupération du dashboard admin'
@@ -259,6 +270,7 @@ async getSupervisorDashboard(req, res) {
   }
 
   // 💰 TRANSACTION ADMIN - VERSION ULTRA OPTIMISÉE// 💰 TRANSACTION ADMIN - VERSION CORRIGÉE POUR PARTENAIRES
+// 💰 TRANSACTION ADMIN - VERSION COMPLÈTE AVEC PARTENAIRE LIBRE
 async createAdminTransaction(req, res) {
   try {
     if (req.user.role !== 'ADMIN') {
@@ -269,13 +281,42 @@ async createAdminTransaction(req, res) {
     }
 
     const adminId = req.user.id;
-    const { superviseurId, typeCompte, typeOperation, montant, partenaireId } = req.body;
+    const { 
+      superviseurId, 
+      typeCompte, 
+      typeOperation, 
+      montant, 
+      partenaireId,
+      partenaireNom
+    } = req.body;
 
-    // ✅ VALIDATION MODIFIÉE - typeCompte requis seulement si ce n'est pas une transaction partenaire
+    console.log('🔍 [CONTROLLER] Données reçues:', {
+      superviseurId,
+      typeCompte,
+      typeOperation,
+      montant,
+      partenaireId,
+      partenaireNom,
+      hasPartenaireNom: !!partenaireNom
+    });
+
+    // Validation
     const validationErrors = [];
     
     if (!superviseurId) validationErrors.push('superviseurId requis');
-    if (!partenaireId && !typeCompte) validationErrors.push('typeCompte requis pour transactions début/fin journée');
+    
+    const hasPartenaireId = !!partenaireId;
+    const hasPartenaireNom = !!partenaireNom;
+    const isPartnerTransaction = hasPartenaireId || hasPartenaireNom;
+    
+    if (!isPartnerTransaction && !typeCompte) {
+      validationErrors.push('typeCompte requis pour transactions début/fin journée');
+    }
+    
+    if (hasPartenaireId && hasPartenaireNom) {
+      validationErrors.push('Choisissez soit un partenaire enregistré, soit un nom libre (pas les deux)');
+    }
+    
     if (!typeOperation) validationErrors.push('typeOperation requis');
     if (!montant) validationErrors.push('montant requis');
     
@@ -286,7 +327,6 @@ async createAdminTransaction(req, res) {
       });
     }
 
-    // ✅ VALIDATION DU MONTANT OPTIMISÉE
     const montantFloat = parseFloat(montant);
     
     if (isNaN(montantFloat) || montantFloat <= 0) {
@@ -296,7 +336,6 @@ async createAdminTransaction(req, res) {
       });
     }
 
-    // ✅ VALIDATION MODIFIÉE - typeOperation toujours requis
     const validOperations = ['depot', 'retrait'];
 
     if (!validOperations.includes(typeOperation)) {
@@ -306,37 +345,35 @@ async createAdminTransaction(req, res) {
       });
     }
 
-    // ✅ VALIDATION typeCompte SEULEMENT pour transactions non-partenaires
-   // VALIDATION typeCompte SEULEMENT pour transactions non-partenaires
-if (!partenaireId) {
-  if (!typeCompte) {
-    return res.status(400).json({
-      success: false,
-      message: 'Type de compte requis pour transactions début/fin journée'
-    });
-  }
-  
-  const validAccountTypes = ['LIQUIDE', 'ORANGE_MONEY', 'WAVE', 'UV_MASTER'];
-  
-  if (!validAccountTypes.includes(typeCompte.toUpperCase())) {
-    return res.status(400).json({
-      success: false,
-      message: 'Type de compte invalide'
-    });
-  }
-}
+    if (!isPartnerTransaction) {
+      if (!typeCompte) {
+        return res.status(400).json({
+          success: false,
+          message: 'Type de compte requis pour transactions début/fin journée'
+        });
+      }
+      
+      const validAccountTypes = ['LIQUIDE', 'ORANGE_MONEY', 'WAVE', 'UV_MASTER'];
+      
+      if (!validAccountTypes.includes(typeCompte.toUpperCase())) {
+        return res.status(400).json({
+          success: false,
+          message: 'Type de compte invalide'
+        });
+      }
+    }
 
-    // ✅ APPEL SERVICE MODIFIÉ - typeCompte optionnel pour partenaires
+    console.log('✅ [CONTROLLER] Validation passée, appel service...');
+
     const result = await TransactionService.createAdminTransaction(adminId, {
       superviseurId,
-      typeCompte: partenaireId ? null : typeCompte.toUpperCase(),
+      typeCompte: isPartnerTransaction ? null : typeCompte.toUpperCase(),
       typeOperation,
       montant: montantFloat,
-      partenaireId
+      partenaireId: partenaireId || null,
+      partenaireNom: partenaireNom || null
     });
 
-    // ✅ RÉPONSE ADAPTÉE selon le type de transaction
-    const isPartnerTransaction = !!partenaireId;
     const operationLabel = typeOperation === 'depot' ? 'Dépôt' : 'Retrait';
     const transactionTypeLabel = isPartnerTransaction 
       ? `${operationLabel} partenaire` 
@@ -354,19 +391,20 @@ if (!partenaireId) {
           partenaire: result.transaction.partnerName,
           montant: result.transaction.montant,
           typeCompte: isPartnerTransaction ? null : typeCompte.toUpperCase(),
-          soldeApres: result.soldeActuel || null
+          soldeApres: result.soldeActuel || null,
+          isRegisteredPartner: result.transaction.isRegisteredPartner || false
         }
       }
     });
 
   } catch (error) {
-    console.error('❌ [OPTIMIZED] Erreur createAdminTransaction:', error);
+    console.error('❌ [CONTROLLER] Erreur createAdminTransaction:', error);
     
-    // ✅ GESTION D'ERREURS OPTIMISÉE
     const errorMappings = {
       'Superviseur non trouvé': { status: 404, message: 'Superviseur non trouvé ou inactif' },
-      'Partenaire non trouvé': { status: 404, message: 'Partenaire non trouvé ou inactif' },
-      'Solde insuffisant': { status: 400, message: error.message }
+      'Partenaire non trouvé': { status: 404, message: 'Partenaire enregistré non trouvé ou inactif' },
+      'Solde insuffisant': { status: 400, message: error.message },
+      'Nom du partenaire invalide': { status: 400, message: error.message }
     };
 
     for (const [errorKey, errorResponse] of Object.entries(errorMappings)) {
@@ -384,7 +422,6 @@ if (!partenaireId) {
     });
   }
 }
-
   // ✏️ MISE À JOUR TRANSACTION - ULTRA OPTIMISÉE
   async updateTransaction(req, res) {
     console.log('🔄 [OPTIMIZED] updateTransaction démarré:', {

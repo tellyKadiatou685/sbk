@@ -24,7 +24,7 @@ const corsOptions = {
       'http://localhost:3000',
       'http://localhost:8080',
       'http://localhost:8081',
-      'http://172.20.10.2:8081'
+      'http://172.20.10.2:8082'
     ];
     
     const prodOrigins = [

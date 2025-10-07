@@ -32,13 +32,12 @@ const validateAmount = (req, res, next) => {
   next();
 };
 
-// Middleware de validation pour les types de compte - CORRIGÉ
 const validateAccountType = (req, res, next) => {
-  const { typeCompte, partenaireId } = req.body;
+  const { typeCompte, partenaireId, partenaireNom } = req.body;
   
-  // EXEMPTION pour les transactions partenaires
-  if (partenaireId) {
-    return next(); // Passer directement si c'est une transaction partenaire
+  // EXEMPTION pour les transactions partenaires (enregistrés OU libres)
+  if (partenaireId || partenaireNom) {
+    return next();
   }
   
   const validTypes = ['LIQUIDE', 'ORANGE_MONEY', 'WAVE', 'UV_MASTER', 'AUTRES'];
