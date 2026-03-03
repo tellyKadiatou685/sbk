@@ -10,6 +10,8 @@ import userRoutes from './routes/userRoutes.js';
 import TransactionRoute from './routes/transactionRoutes.js';
 import RecentTransactionRoutes from './routes/recentTransactionRoutes.js';
 import AccountLines from './routes/accountLines.js';
+import cronHandler from '../api/cron.js';
+
 
 const app = express();
 
@@ -105,6 +107,7 @@ app.use('/api/', limiter);
 // Middleware de parsing
 app.use(express.json({ limit: '10mb', strict: true }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.post('/api/cron/reset', (req, res) => cronHandler(req, res));
 
 // Middleware de logging
 app.use((req, res, next) => {
@@ -174,7 +177,6 @@ app.use('/api/users', userRoutes);
 app.use('/api/transactions', TransactionRoute);
 app.use('/api/recent', RecentTransactionRoutes);
 app.use('/api/account-lines', AccountLines);
-
 
 // Route de test auth
 app.get('/api/test-auth', (req, res) => {
